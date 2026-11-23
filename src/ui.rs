@@ -40,6 +40,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::Rooms => draw_rooms(f, app),
         Mode::NewRoom => draw_newroom(f, app),
         Mode::Note => draw_note(f, app),
+        Mode::Loot => draw_loot(f, app),
+        Mode::AddLoot => draw_addloot(f, app),
         _ => {}
     }
 }
@@ -686,9 +688,11 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Mode::Rooms => &[("↑↓", "move"), ("⏎", "activate"), ("n", "new"), ("o", "notes"), ("esc", "close")],
         Mode::Note => &[("type", "note"), ("⏎", "save"), ("esc", "cancel")],
         Mode::NewRoom => &[("⇥", "field"), ("^s", "create"), ("esc", "cancel")],
+        Mode::Loot => &[("↑↓", "move"), ("⏎", "use"), ("a", "add"), ("d", "del"), ("esc", "close")],
+        Mode::AddLoot => &[("⇥", "field"), ("^s", "save"), ("esc", "cancel")],
         Mode::Normal => &[
             ("↹", "pane"), ("⏎", "copy"), ("x", "run"), ("e", "vars"),
-            ("c", "room"), ("w", "note"), ("a", "add"), ("/", "find"), ("?", "help"),
+            ("c", "room"), ("L", "loot"), ("w", "note"), ("/", "find"), ("?", "help"),
         ],
     };
     render_footer(f, app, area, pairs);
@@ -807,6 +811,97 @@ fn draw_vars(f: &mut Frame, app: &App) {
     }
 
     f.render_widget(List::new(items), inner);
+}
+
+fn draw_loot(f: &mut Frame, app: &App) {
+    let area = centered(f.area(), 72, 22);
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(ACCENT2))
+        .title(Span::styled(" loot ", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD)))
+        .title(Line::from(Span::styled(
+            format!(" {} creds ", app.loot.len()),
+            Style::default().fg(DIM),
+        )).right_aligned())
+        .style(Style::default().bg(PANEL));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if app.loot.is_empty() {
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled("no creds captured yet.", Style::default().fg(DIM))),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("press ", Style::default().fg(DIM)),
+                    Span::styled("a", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                    Span::styled(" to add user:pass / hash as you find them.", Style::default().fg(DIM)),
+                    Span::styled("  ⏎ loads them into USER/PASS/HASH.", Style::default().fg(DIM)),
+                ]),
+            ])
+            .wrap(Wrap { trim: true }),
+            inner,
+        );
+        return;
+    }
+
+    let rows: Vec<ListItem> = app
+        .loot
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let sel = i == app.loot_idx;
+            let mark = if sel {
+                Span::styled("▎", Style::default().fg(crate::anim::pulse(app.tick)))
+            } else {
+                Span::raw(" ")
+            };
+            let mut spans = vec![
+                mark,
+                Span::styled(" ", Style::default()),
+                Span::styled(
+                    c.label(),
+                    Style::default()
+                        .fg(if sel { FG } else { Color::Rgb(0xb0, 0xbc, 0xc9) })
+                        .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
+                ),
+            ];
+            if !c.note.is_empty() {
+                spans.push(Span::styled(format!("   {}", c.note), Style::default().fg(DIM)));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(app.loot_idx));
+    f.render_stateful_widget(
+        List::new(rows).highlight_style(Style::default().bg(SEL_BG)),
+        inner,
+        &mut state,
+    );
+}
+
+fn draw_addloot(f: &mut Frame, app: &App) {
+    let area = centered(f.area(), 64, 15);
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(ACCENT2))
+        .title(Span::styled(" add loot ", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD)))
+        .style(Style::default().bg(PANEL));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3); 4])
+        .split(inner);
+    draw_field(f, rows[0], "user", &app.loot_form.user, app.loot_form.field == 0);
+    draw_field(f, rows[1], "pass", &app.loot_form.pass, app.loot_form.field == 1);
+    draw_field(f, rows[2], "hash", &app.loot_form.hash, app.loot_form.field == 2);
+    draw_field(f, rows[3], "note", &app.loot_form.note, app.loot_form.field == 3);
 }
 
 fn draw_rooms(f: &mut Frame, app: &App) {
@@ -1151,6 +1246,7 @@ fn draw_help(f: &mut Frame) {
         Line::from(""),
         Line::from(Span::styled(" ctf rooms + writeup", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD))),
         row("c", "rooms: pick/activate, n=new, o=notes"),
+        row("L", "loot: capture creds → ⏎ load USER/PASS/HASH"),
         row("w", "add a writeup note to the log"),
         row("o", "open active room's notes in $EDITOR"),
         Line::from(""),

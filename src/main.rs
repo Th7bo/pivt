@@ -1,6 +1,7 @@
 mod anim;
 mod app;
 mod clipboard;
+mod loot;
 mod model;
 mod netif;
 mod room;
@@ -84,6 +85,18 @@ fn snapshot(what: &str) {
             for r in &mut app.runs {
                 r.poll();
             }
+        }
+        "loot" => {
+            app.loot = vec![
+                loot::Cred { user: "svc-web".into(), pass: "Summer2024!".into(), hash: String::new(), note: "from config.php".into() },
+                loot::Cred { user: "administrator".into(), pass: String::new(), hash: "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0".into(), note: "secretsdump".into() },
+            ];
+            app.mode = Mode::Loot;
+        }
+        "addloot" => {
+            app.add_loot_open();
+            app.loot_form.user = "svc-web".into();
+            app.loot_form.pass = "Summer2024!".into();
         }
         "vars" => app.mode = Mode::Vars,
         "add" => {
@@ -205,6 +218,48 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Rooms => rooms_keys(app, key),
         Mode::Note => note_keys(app, key),
         Mode::NewRoom => newroom_keys(app, key),
+        Mode::Loot => loot_keys(app, key),
+        Mode::AddLoot => addloot_keys(app, key),
+    }
+}
+
+fn loot_keys(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.mode = Mode::Normal,
+        KeyCode::Down | KeyCode::Char('j') => app.loot_next(),
+        KeyCode::Up | KeyCode::Char('k') => app.loot_prev(),
+        KeyCode::Enter | KeyCode::Char('u') => app.loot_use(),
+        KeyCode::Char('a') => app.add_loot_open(),
+        KeyCode::Char('d') => app.loot_delete(),
+        _ => {}
+    }
+}
+
+fn addloot_keys(app: &mut App, key: KeyEvent) {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
+        if app.add_loot_save() {
+            app.mode = Mode::Loot;
+        }
+        return;
+    }
+    match key.code {
+        KeyCode::Esc => app.mode = Mode::Loot,
+        KeyCode::Tab | KeyCode::Down => app.add_loot_next(),
+        KeyCode::BackTab | KeyCode::Up => app.add_loot_prev(),
+        KeyCode::Enter => {
+            if app.loot_form.field == 3 {
+                if app.add_loot_save() {
+                    app.mode = Mode::Loot;
+                }
+            } else {
+                app.add_loot_next();
+            }
+        }
+        KeyCode::Backspace => {
+            app.loot_form.buf_mut().pop();
+        }
+        KeyCode::Char(c) => app.loot_form.buf_mut().push(c),
+        _ => {}
     }
 }
 
@@ -318,6 +373,7 @@ fn normal_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Char('c') => app.open_rooms(),
         KeyCode::Char('w') => app.note_open(),
         KeyCode::Char('o') => app.open_active_notes(),
+        KeyCode::Char('L') => app.open_loot(),
         _ => {}
     }
 }

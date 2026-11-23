@@ -1,3 +1,4 @@
+use crate::loot::{self, Cred};
 use crate::model::*;
 use crate::room::{self, Room};
 use crate::runner::RunJob;
@@ -26,6 +27,28 @@ pub enum Mode {
     Rooms,
     Note,
     NewRoom,
+    Loot,
+    AddLoot,
+}
+
+#[derive(Default)]
+pub struct LootForm {
+    pub user: String,
+    pub pass: String,
+    pub hash: String,
+    pub note: String,
+    pub field: usize, // 0..=3
+}
+
+impl LootForm {
+    pub fn buf_mut(&mut self) -> &mut String {
+        match self.field {
+            0 => &mut self.user,
+            1 => &mut self.pass,
+            2 => &mut self.hash,
+            _ => &mut self.note,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -130,6 +153,11 @@ pub struct App {
     pub show_run: bool,
     pub interacting: bool, // keystrokes go to the focused job's PTY
 
+    // loot / creds
+    pub loot: Vec<Cred>,
+    pub loot_idx: usize,
+    pub loot_form: LootForm,
+
     matcher: SkimMatcherV2,
 }
 
@@ -172,6 +200,11 @@ impl App {
             }
         }
 
+        let loot = {
+            let target = vars.get("RHOST").cloned().unwrap_or_default();
+            loot::load(&loot::loot_path(active_room.as_ref(), &target))
+        };
+
         let skip_splash = std::env::var("PIVT_NO_SPLASH").is_ok()
             || std::env::args().any(|a| a == "--no-splash");
         let categories = derive_categories(&commands);
@@ -206,6 +239,9 @@ impl App {
             run_tab: 0,
             show_run: false,
             interacting: false,
+            loot,
+            loot_idx: 0,
+            loot_form: LootForm::default(),
             matcher: SkimMatcherV2::default(),
         };
         app.clamp();
@@ -770,6 +806,96 @@ impl App {
         if !self.show_run && self.focus == Focus::Run {
             self.focus = Focus::Commands;
         }
+    }
+
+    // ── loot / creds ──
+    fn loot_file(&self) -> std::path::PathBuf {
+        let target = self.vars.get("RHOST").cloned().unwrap_or_default();
+        loot::loot_path(self.active_room.as_ref(), &target)
+    }
+    fn loot_persist(&self) {
+        loot::save(&self.loot_file(), &self.loot);
+    }
+    pub fn open_loot(&mut self) {
+        // reload in case the room/target changed
+        self.loot = loot::load(&self.loot_file());
+        if self.loot_idx >= self.loot.len() {
+            self.loot_idx = self.loot.len().saturating_sub(1);
+        }
+        self.mode = Mode::Loot;
+    }
+    pub fn loot_next(&mut self) {
+        if !self.loot.is_empty() {
+            self.loot_idx = (self.loot_idx + 1) % self.loot.len();
+        }
+    }
+    pub fn loot_prev(&mut self) {
+        if !self.loot.is_empty() {
+            self.loot_idx = (self.loot_idx + self.loot.len() - 1) % self.loot.len();
+        }
+    }
+    pub fn loot_use(&mut self) {
+        if let Some(c) = self.loot.get(self.loot_idx).cloned() {
+            let mut set = Vec::new();
+            if !c.user.is_empty() {
+                self.vars.insert("USER".into(), c.user.clone());
+                set.push("USER");
+            }
+            if !c.pass.is_empty() {
+                self.vars.insert("PASS".into(), c.pass.clone());
+                set.push("PASS");
+            }
+            if !c.hash.is_empty() {
+                self.vars.insert("HASH".into(), c.hash.clone());
+                set.push("HASH");
+            }
+            self.persist_config();
+            if set.is_empty() {
+                self.set_status("that entry has nothing to load");
+            } else {
+                self.set_status(format!("✓ loaded {} from loot", set.join("+")));
+            }
+        }
+    }
+    pub fn loot_delete(&mut self) {
+        if self.loot_idx < self.loot.len() {
+            self.loot.remove(self.loot_idx);
+            if self.loot_idx >= self.loot.len() && self.loot_idx > 0 {
+                self.loot_idx -= 1;
+            }
+            self.loot_persist();
+            self.set_status("✗ loot entry removed");
+        }
+    }
+    pub fn add_loot_open(&mut self) {
+        self.loot_form = LootForm::default();
+        // pre-fill from current vars for convenience
+        self.loot_form.user = self.vars.get("USER").cloned().unwrap_or_default();
+        self.loot_form.pass = self.vars.get("PASS").cloned().unwrap_or_default();
+        self.mode = Mode::AddLoot;
+    }
+    pub fn add_loot_next(&mut self) {
+        self.loot_form.field = (self.loot_form.field + 1) % 4;
+    }
+    pub fn add_loot_prev(&mut self) {
+        self.loot_form.field = (self.loot_form.field + 3) % 4;
+    }
+    pub fn add_loot_save(&mut self) -> bool {
+        let c = Cred {
+            user: self.loot_form.user.trim().to_string(),
+            pass: self.loot_form.pass.trim().to_string(),
+            hash: self.loot_form.hash.trim().to_string(),
+            note: self.loot_form.note.trim().to_string(),
+        };
+        if c.is_empty() {
+            self.set_status("nothing to save");
+            return false;
+        }
+        self.loot.push(c);
+        self.loot_idx = self.loot.len() - 1;
+        self.loot_persist();
+        self.set_status(format!("✓ loot saved → {}", short_path(&self.loot_file())));
+        true
     }
 
     // ── inline variable editing (preview pane) ──
