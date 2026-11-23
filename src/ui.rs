@@ -127,8 +127,16 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     } else {
         format!("{}:{}", if lhost.is_empty() { "·" } else { &lhost }, if lport.is_empty() { "·" } else { &lport })
     };
+    // reachability dot (background ping)
+    let ping = app.ping();
+    let dot = match ping.up {
+        Some(true) => Span::styled("● ", Style::default().fg(OK)),
+        Some(false) => Span::styled("● ", Style::default().fg(WARN)),
+        None => Span::styled("○ ", Style::default().fg(DIM)),
+    };
     let targets = Line::from(vec![
-        Span::styled(" ◎ ", Style::default().fg(ACCENT2)),
+        Span::raw(" "),
+        dot,
         v(&rhost, "no target"),
         Span::styled("  ⇡ ", Style::default().fg(ACCENT2)),
         if lhost.is_empty() && lport.is_empty() {
@@ -137,11 +145,17 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(listener, Style::default().fg(OK).add_modifier(Modifier::BOLD))
         },
     ]);
-    f.render_widget(
-        Paragraph::new(targets)
-            .block(bare_block(BORDER).title(Span::styled(" target ", Style::default().fg(DIM)))),
-        cols[2],
-    );
+    // box timer (+ rtt) on the right of the target border
+    let timer = match (app.box_elapsed(), ping.rtt_ms) {
+        (Some(t), Some(r)) => format!(" ⏱ {t} · {r}ms "),
+        (Some(t), None) => format!(" ⏱ {t} "),
+        _ => String::new(),
+    };
+    let mut block = bare_block(BORDER).title(Span::styled(" target ", Style::default().fg(DIM)));
+    if !timer.is_empty() {
+        block = block.title(Line::from(Span::styled(timer, Style::default().fg(DIM))).right_aligned());
+    }
+    f.render_widget(Paragraph::new(targets).block(block), cols[2]);
 }
 
 fn bare_block(border: Color) -> Block<'static> {

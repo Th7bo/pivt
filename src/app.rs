@@ -1,5 +1,6 @@
 use crate::loot::{self, Cred};
 use crate::model::*;
+use crate::ping::{Ping, Pinger};
 use crate::room::{self, Room};
 use crate::runner::RunJob;
 use crate::{clipboard, netif, writeup};
@@ -7,6 +8,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Instant;
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub enum Focus {
@@ -180,6 +182,11 @@ pub struct App {
     pub flow_bg: bool,
     pub mouse: Option<(u16, u16)>,
 
+    // live target status
+    pinger: Pinger,
+    pub box_started: Option<Instant>,
+    last_rhost: String,
+
     matcher: SkimMatcherV2,
 }
 
@@ -273,6 +280,9 @@ impl App {
             flag_buf: String::new(),
             flow_bg,
             mouse: None,
+            pinger: Pinger::start(),
+            box_started: None,
+            last_rhost: String::new(),
             matcher: SkimMatcherV2::default(),
         };
         app.refresh_categories();
@@ -299,6 +309,29 @@ impl App {
             r.poll();
             r.resize(rows, cols);
         }
+        // track RHOST changes: re-point the pinger and (re)start the box timer
+        let rhost = self.vars.get("RHOST").cloned().unwrap_or_default();
+        if rhost != self.last_rhost {
+            self.last_rhost = rhost.clone();
+            self.pinger.set_target(&rhost);
+            self.box_started = if rhost.is_empty() { None } else { Some(Instant::now()) };
+        }
+    }
+
+    pub fn ping(&self) -> Ping {
+        self.pinger.get()
+    }
+
+    /// Elapsed time on the current box, as mm:ss or h:mm:ss.
+    pub fn box_elapsed(&self) -> Option<String> {
+        let start = self.box_started?;
+        let secs = start.elapsed().as_secs();
+        let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+        Some(if h > 0 {
+            format!("{h}:{m:02}:{s:02}")
+        } else {
+            format!("{m:02}:{s:02}")
+        })
     }
 
     pub fn current_category(&self) -> Option<&str> {

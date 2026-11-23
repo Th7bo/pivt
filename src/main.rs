@@ -4,6 +4,7 @@ mod clipboard;
 mod loot;
 mod model;
 mod netif;
+mod ping;
 mod room;
 mod runner;
 mod theme;
