@@ -39,6 +39,14 @@ pub fn category_style(name: &str) -> (char, Color) {
         "pivot" => ('⇄', Color::Rgb(0xf4, 0x72, 0xb6)),
         "misc" => ('●', Color::Rgb(0x94, 0xa3, 0xb8)),
         "encode" => ('⧉', Color::Rgb(0x34, 0xd3, 0x99)),
+        "dns" => ('◈', Color::Rgb(0x81, 0x8c, 0xf8)),
+        "snmp" => ('▦', Color::Rgb(0x2d, 0xd4, 0xbf)),
+        "rpc" => ('⊞', Color::Rgb(0xc0, 0x8b, 0xfa)),
+        "db" => ('◰', Color::Rgb(0xf4, 0x72, 0xb6)),
+        "tunnel" => ('≈', Color::Rgb(0x22, 0xd3, 0xee)),
+        "forensics" => ('⌕', Color::Rgb(0xf0, 0xb4, 0x57)),
+        "pwn" => ('⚑', Color::Rgb(0xf8, 0x72, 0x72)),
+        "win" => ('❖', Color::Rgb(0x60, 0xa5, 0xfa)),
         _ => ('◆', ACCENT),
     }
 }

