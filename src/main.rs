@@ -1,6 +1,7 @@
 mod anim;
 mod app;
 mod clipboard;
+mod gtfobins;
 mod loot;
 mod model;
 mod netif;
@@ -112,6 +113,10 @@ fn snapshot(what: &str) {
             app.flow_bg = true;
             app.tick = 22;
             app.splash_start = 0;
+        }
+        "gtfo" => {
+            app.open_gtfo();
+            app.gtfo_query = "find".into();
         }
         "burst" => {
             app.mode = Mode::Normal;
@@ -260,6 +265,19 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Loot => loot_keys(app, key),
         Mode::AddLoot => addloot_keys(app, key),
         Mode::Flag => flag_keys(app, key),
+        Mode::Gtfo => gtfo_keys(app, key),
+    }
+}
+
+fn gtfo_keys(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => app.mode = Mode::Normal,
+        KeyCode::Enter => app.gtfo_copy(),
+        KeyCode::Down => app.gtfo_next(),
+        KeyCode::Up => app.gtfo_prev(),
+        KeyCode::Backspace => app.gtfo_pop(),
+        KeyCode::Char(c) => app.gtfo_push(c),
+        _ => {}
     }
 }
 
@@ -429,6 +447,7 @@ fn normal_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Char('L') => app.open_loot(),
         KeyCode::Char('f') => app.toggle_favorite(),
         KeyCode::Char('b') => app.toggle_bg(),
+        KeyCode::Char('g') => app.open_gtfo(),
         KeyCode::Char('F') => app.flag_open(),
         KeyCode::Char('E') => app.export_writeup(),
         _ => {}

@@ -48,6 +48,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::Loot => draw_loot(f, app),
         Mode::AddLoot => draw_addloot(f, app),
         Mode::Flag => draw_flag(f, app),
+        Mode::Gtfo => draw_gtfo(f, app),
         _ => {}
     }
 
@@ -742,6 +743,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Mode::Loot => &[("↑↓", "move"), ("⏎", "use"), ("a", "add"), ("d", "del"), ("esc", "close")],
         Mode::AddLoot => &[("⇥", "field"), ("^s", "save"), ("esc", "cancel")],
         Mode::Flag => &[("⇥", "user/root"), ("type", "value"), ("⏎", "save+copy"), ("esc", "cancel")],
+        Mode::Gtfo => &[("type", "filter binary"), ("↑↓", "move"), ("⏎", "copy"), ("esc", "close")],
         Mode::Normal => &[
             ("↹", "pane"), ("⏎", "copy"), ("x", "run"), ("e", "vars"),
             ("c", "room"), ("L", "loot"), ("w", "note"), ("/", "find"), ("?", "help"),
@@ -863,6 +865,87 @@ fn draw_vars(f: &mut Frame, app: &App) {
     }
 
     f.render_widget(List::new(items), inner);
+}
+
+fn draw_gtfo(f: &mut Frame, app: &App) {
+    use crate::gtfobins::GTFOBINS;
+    let area = centered(f.area(), 84, 24);
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Rgb(0x94, 0xa3, 0xb8)))
+        .title(Span::styled(" GTFOBins ", Style::default().fg(FG).add_modifier(Modifier::BOLD)))
+        .title(Line::from(Span::styled(" privesc one-liners ", Style::default().fg(DIM))).right_aligned())
+        .style(Style::default().bg(PANEL));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(inner);
+
+    // search
+    let q: Line = if app.gtfo_query.is_empty() {
+        Line::from(vec![
+            Span::styled(" / ", Style::default().fg(ACCENT)),
+            Span::styled("type a binary — find, vim, python…", Style::default().fg(DIM)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" / ", Style::default().fg(ACCENT)),
+            Span::styled(app.gtfo_query.clone(), Style::default().fg(FG).add_modifier(Modifier::BOLD)),
+            Span::styled("▏", Style::default().fg(ACCENT)),
+        ])
+    };
+    f.render_widget(Paragraph::new(q), rows[0]);
+
+    // kind → color
+    let kind_color = |k: &str| match k {
+        "sudo" => WARN,
+        "suid" => Color::Rgb(0xfb, 0x92, 0x3c),
+        "shell" => OK,
+        "pager" => ACCENT2,
+        k if k.starts_with("file") => ACCENT,
+        _ => DIM,
+    };
+
+    let matches = app.gtfo_matches();
+    let items: Vec<ListItem> = matches
+        .iter()
+        .enumerate()
+        .map(|(row, &gi)| {
+            let g = &GTFOBINS[gi];
+            let sel = row == app.gtfo_idx;
+            let mark = if sel {
+                Span::styled("▎", Style::default().fg(crate::anim::pulse(app.tick)))
+            } else {
+                Span::raw(" ")
+            };
+            let mut spans = vec![
+                mark,
+                Span::styled(format!("{:<11}", g.bin), Style::default().fg(if sel { FG } else { Color::Rgb(0xb0, 0xbc, 0xc9) }).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() })),
+                Span::styled(format!("{:<11}", g.kind), Style::default().fg(kind_color(g.kind))),
+            ];
+            if sel {
+                spans.push(Span::styled(g.code.to_string(), Style::default().fg(OK)));
+            } else {
+                let short: String = g.code.chars().take(40).collect();
+                spans.push(Span::styled(short, Style::default().fg(DIM)));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let mut state = ListState::default();
+    if !items.is_empty() {
+        state.select(Some(app.gtfo_idx));
+    }
+    f.render_stateful_widget(
+        List::new(items).highlight_style(Style::default().bg(SEL_BG)),
+        rows[1],
+        &mut state,
+    );
 }
 
 fn draw_flag(f: &mut Frame, app: &App) {
@@ -1357,6 +1440,7 @@ fn draw_help(f: &mut Frame) {
         Line::from(Span::styled(" ctf rooms + writeup", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD))),
         row("c", "rooms: pick/activate, n=new, o=notes"),
         row("L", "loot: capture creds → ⏎ load USER/PASS/HASH"),
+        row("g", "GTFOBins privesc lookup (offline)"),
         row("w", "add a writeup note to the log"),
         row("F / E", "capture flag → notes · export writeup.md"),
         row("o", "open active room's notes in $EDITOR"),

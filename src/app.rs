@@ -32,6 +32,7 @@ pub enum Mode {
     Loot,
     AddLoot,
     Flag,
+    Gtfo,
 }
 
 #[derive(Default)]
@@ -180,6 +181,10 @@ pub struct App {
     pub burst_start: Option<u64>, // tick the flag-capture burst began
     pub burst_label: String,
 
+    // gtfobins lookup
+    pub gtfo_query: String,
+    pub gtfo_idx: usize,
+
     // background effect
     pub flow_bg: bool,
     pub mouse: Option<(u16, u16)>,
@@ -282,6 +287,8 @@ impl App {
             flag_buf: String::new(),
             burst_start: None,
             burst_label: String::new(),
+            gtfo_query: String::new(),
+            gtfo_idx: 0,
             flow_bg,
             mouse: None,
             pinger: Pinger::start(),
@@ -1084,6 +1091,60 @@ impl App {
             None
         } else {
             Some(d as f32 / Self::BURST_LEN as f32)
+        }
+    }
+
+    // ── gtfobins ──
+    pub fn open_gtfo(&mut self) {
+        self.gtfo_query.clear();
+        self.gtfo_idx = 0;
+        self.mode = Mode::Gtfo;
+    }
+    pub fn gtfo_matches(&self) -> Vec<usize> {
+        use crate::gtfobins::GTFOBINS;
+        if self.gtfo_query.is_empty() {
+            return (0..GTFOBINS.len()).collect();
+        }
+        let mut scored: Vec<(i64, usize)> = GTFOBINS
+            .iter()
+            .enumerate()
+            .filter_map(|(i, g)| {
+                let hay = format!("{} {} {}", g.bin, g.kind, g.code);
+                self.matcher.fuzzy_match(&hay, &self.gtfo_query).map(|s| (s, i))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.into_iter().map(|(_, i)| i).collect()
+    }
+    pub fn gtfo_push(&mut self, c: char) {
+        self.gtfo_query.push(c);
+        self.gtfo_idx = 0;
+    }
+    pub fn gtfo_pop(&mut self) {
+        self.gtfo_query.pop();
+        self.gtfo_idx = 0;
+    }
+    pub fn gtfo_next(&mut self) {
+        let n = self.gtfo_matches().len();
+        if n > 0 {
+            self.gtfo_idx = (self.gtfo_idx + 1) % n;
+        }
+    }
+    pub fn gtfo_prev(&mut self) {
+        let n = self.gtfo_matches().len();
+        if n > 0 {
+            self.gtfo_idx = (self.gtfo_idx + n - 1) % n;
+        }
+    }
+    pub fn gtfo_copy(&mut self) {
+        use crate::gtfobins::GTFOBINS;
+        let m = self.gtfo_matches();
+        if let Some(&i) = m.get(self.gtfo_idx) {
+            let code = GTFOBINS[i].code;
+            match clipboard::copy(code) {
+                Ok(_) => self.set_status(format!("✓ copied: {code}")),
+                Err(e) => self.set_status(format!("✗ copy failed: {e}")),
+            }
         }
     }
 
