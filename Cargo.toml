@@ -1,0 +1,24 @@
+[package]
+name = "pivt"
+version = "0.1.0"
+edition = "2021"
+description = "pivt — a sleek TUI cheatsheet for CTF / pentest commands"
+
+[[bin]]
+name = "pivt"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "5"
+fuzzy-matcher = "0.3"
+portable-pty = "0.8"
+vt100 = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
