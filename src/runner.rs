@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 
 const SCROLLBACK: usize = 2000;
+const MAX_RAW: usize = 256 * 1024;
 
 /// A command running inside a real PTY. Output is fed to a vt100 parser so the
 /// run pane shows a proper terminal screen (colors, cursor, redraws); the
@@ -14,6 +15,7 @@ pub struct RunJob {
     pub title: String,
     pub cmd: String,
     parser: Arc<Mutex<vt100::Parser>>,
+    raw: Arc<Mutex<String>>,
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
@@ -57,9 +59,11 @@ impl RunJob {
         let writer = pair.master.take_writer().map_err(to_io)?;
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK)));
+        let raw = Arc::new(Mutex::new(String::new()));
         let eof = Arc::new(AtomicBool::new(false));
         {
             let p = parser.clone();
+            let rawc = raw.clone();
             let e = eof.clone();
             thread::spawn(move || {
                 let mut buf = [0u8; 8192];
@@ -69,6 +73,13 @@ impl RunJob {
                         Ok(n) => {
                             if let Ok(mut pr) = p.lock() {
                                 pr.process(&buf[..n]);
+                            }
+                            if let Ok(mut r) = rawc.lock() {
+                                r.push_str(&strip_ansi(&String::from_utf8_lossy(&buf[..n])));
+                                if r.len() > MAX_RAW {
+                                    let cut = r.len() - MAX_RAW;
+                                    *r = r.split_off(cut);
+                                }
                             }
                         }
                         Err(_) => break,
@@ -82,6 +93,7 @@ impl RunJob {
             title,
             cmd,
             parser,
+            raw,
             writer,
             master: pair.master,
             child: Some(child),
@@ -96,6 +108,11 @@ impl RunJob {
 
     pub fn parser(&self) -> Option<MutexGuard<'_, vt100::Parser>> {
         self.parser.lock().ok()
+    }
+
+    /// Full captured output (ANSI stripped) for parsing.
+    pub fn raw_text(&self) -> String {
+        self.raw.lock().map(|r| r.clone()).unwrap_or_default()
     }
 
     pub fn poll(&mut self) {
@@ -184,6 +201,51 @@ impl Drop for RunJob {
 
 fn to_io<E: std::fmt::Display>(e: E) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+}
+
+/// Strip ANSI CSI/OSC escape sequences from captured output (for the raw buffer).
+fn strip_ansi(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == 0x1b {
+            if i + 1 < b.len() && b[i + 1] == b'[' {
+                i += 2;
+                while i < b.len() && !(0x40..=0x7e).contains(&b[i]) {
+                    i += 1;
+                }
+                i += 1;
+                continue;
+            } else if i + 1 < b.len() && b[i + 1] == b']' {
+                i += 2;
+                while i < b.len() && b[i] != 0x07 {
+                    i += 1;
+                }
+                i += 1;
+                continue;
+            } else {
+                i += 1;
+                continue;
+            }
+        }
+        let ch_len = match b[i] {
+            x if x < 0x80 => 1,
+            x if x >> 5 == 0b110 => 2,
+            x if x >> 4 == 0b1110 => 3,
+            x if x >> 3 == 0b11110 => 4,
+            _ => 1,
+        };
+        if i + ch_len <= b.len() {
+            if let Ok(ch) = std::str::from_utf8(&b[i..i + ch_len]) {
+                out.push_str(ch);
+            }
+            i += ch_len;
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Approximate the run pane's inner (rows, cols) from the current terminal size,

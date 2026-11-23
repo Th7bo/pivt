@@ -117,6 +117,7 @@ pub const DEFAULT_VARS: &[&str] = &[
 /// Virtual category names (not real command categories).
 pub const FAV_CAT: &str = "favorites";
 pub const RECENT_CAT: &str = "recent";
+pub const SUGGEST_CAT: &str = "suggested";
 const RECENT_MAX: usize = 25;
 
 pub fn cmd_key(c: &Command) -> String {
@@ -174,6 +175,8 @@ pub struct App {
     // favorites + recent (command keys "category/name")
     pub favorites: Vec<String>,
     pub recent: Vec<String>,
+    // commands suggested from a parsed scan
+    pub suggested: Vec<String>,
 
     // flag capture
     pub flag_is_root: bool,
@@ -283,6 +286,7 @@ impl App {
             loot_form: LootForm::default(),
             favorites,
             recent,
+            suggested: Vec::new(),
             flag_is_root: false,
             flag_buf: String::new(),
             burst_start: None,
@@ -353,6 +357,9 @@ impl App {
     /// followed by the real categories.
     pub fn refresh_categories(&mut self) {
         let mut v = Vec::new();
+        if !self.suggested.is_empty() {
+            v.push(SUGGEST_CAT.to_string());
+        }
         if !self.favorites.is_empty() {
             v.push(FAV_CAT.to_string());
         }
@@ -371,6 +378,7 @@ impl App {
         match name {
             FAV_CAT => self.favorites.len(),
             RECENT_CAT => self.recent.len(),
+            SUGGEST_CAT => self.suggested.len(),
             _ => self.commands.iter().filter(|c| c.category == name).count(),
         }
     }
@@ -429,6 +437,11 @@ impl App {
             scored.into_iter().map(|(_, i)| i).collect()
         } else {
             match self.current_category() {
+                Some(SUGGEST_CAT) => self
+                    .suggested
+                    .iter()
+                    .filter_map(|k| self.command_by_key(k))
+                    .collect(),
                 Some(FAV_CAT) => self
                     .favorites
                     .iter()
@@ -937,6 +950,87 @@ impl App {
         }
     }
 
+    /// Parse the active run tab's output for open ports, set PORTS (+URL), and
+    /// build a "suggested" category of commands matching the services found.
+    pub fn parse_scan(&mut self) {
+        let text = match self.active_run() {
+            Some(j) => j.raw_text(),
+            None => {
+                self.set_status("no run tab — run a scan with x first");
+                return;
+            }
+        };
+        let mut ports: Vec<String> = Vec::new();
+        let mut services: Vec<String> = Vec::new();
+        for line in text.lines() {
+            let mut it = line.split_whitespace();
+            if let Some(p0) = it.next() {
+                let port = p0.strip_suffix("/tcp").or_else(|| p0.strip_suffix("/udp"));
+                if let Some(port) = port {
+                    if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
+                        if it.next() == Some("open") {
+                            if !ports.contains(&port.to_string()) {
+                                ports.push(port.to_string());
+                            }
+                            if let Some(svc) = it.next() {
+                                let svc = svc.to_string();
+                                if !services.contains(&svc) {
+                                    services.push(svc);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if ports.is_empty() {
+            self.set_status("no open ports found in that output");
+            return;
+        }
+        self.vars.insert("PORTS".into(), ports.join(","));
+        // seed URL if a web port is open and URL unset
+        let rhost = self.vars.get("RHOST").cloned().unwrap_or_default();
+        if self.vars.get("URL").map(|u| u.is_empty()).unwrap_or(true) && !rhost.is_empty() {
+            if services.iter().any(|s| s.contains("https")) || ports.iter().any(|p| p == "443") {
+                self.vars.insert("URL".into(), format!("https://{rhost}"));
+            } else if services.iter().any(|s| s.contains("http")) || ports.iter().any(|p| p == "80" || p == "8080") {
+                self.vars.insert("URL".into(), format!("http://{rhost}"));
+            }
+        }
+        // build suggestions
+        let mut keywords: Vec<&str> = Vec::new();
+        for s in &services {
+            keywords.extend(service_keywords(s));
+        }
+        for p in &ports {
+            keywords.extend(port_keywords(p));
+        }
+        let mut suggested: Vec<String> = Vec::new();
+        for c in &self.commands {
+            let hay = format!("{} {} {}", c.category, c.name, c.tags.join(" ")).to_lowercase();
+            if keywords.iter().any(|k| hay.contains(k)) {
+                let key = cmd_key(c);
+                if !suggested.contains(&key) {
+                    suggested.push(key);
+                }
+            }
+        }
+        self.suggested = suggested;
+        self.refresh_categories();
+        self.persist_config();
+        // jump to the suggested category
+        if let Some(pos) = self.categories.iter().position(|c| c == SUGGEST_CAT) {
+            self.cat_idx = pos;
+            self.cmd_idx = 0;
+        }
+        self.set_status(format!(
+            "✓ {} ports ({}) → PORTS set, {} suggested",
+            ports.len(),
+            services.join(","),
+            self.suggested.len()
+        ));
+    }
+
     // ── interactive stdin ──
     pub fn begin_interact(&mut self) {
         if self.active_run().map(|j| j.is_running()).unwrap_or(false) {
@@ -1226,6 +1320,71 @@ fn short_path(p: &std::path::Path) -> String {
         }
     }
     s
+}
+
+/// Map an nmap service name to lowercase keywords matched against command
+/// categories/tags/names.
+fn service_keywords(svc: &str) -> Vec<&'static str> {
+    let s = svc.to_lowercase();
+    let mut k = Vec::new();
+    if s.contains("http") {
+        k.push("web");
+    }
+    if s.contains("microsoft-ds") || s.contains("netbios") || s.contains("smb") {
+        k.push("smb");
+    }
+    if s.contains("ssh") {
+        k.push("ssh");
+    }
+    if s.contains("ldap") {
+        k.push("ldap");
+        k.push("ad");
+    }
+    if s.contains("kerberos") {
+        k.push("ad");
+    }
+    if s.contains("msrpc") || s.contains("rpc") {
+        k.push("rpc");
+    }
+    if s.contains("domain") {
+        k.push("dns");
+    }
+    if s.contains("mysql") {
+        k.push("mysql");
+    }
+    if s.contains("ms-sql") || s.contains("mssql") {
+        k.push("mssql");
+    }
+    if s.contains("postgres") {
+        k.push("postgres");
+    }
+    if s.contains("snmp") {
+        k.push("snmp");
+    }
+    if s.contains("ftp") {
+        k.push("ftp");
+    }
+    if s.contains("winrm") {
+        k.push("winrm");
+    }
+    k
+}
+
+fn port_keywords(port: &str) -> Vec<&'static str> {
+    match port {
+        "80" | "8080" | "443" | "8443" => vec!["web"],
+        "445" | "139" => vec!["smb"],
+        "22" => vec!["ssh"],
+        "389" | "636" => vec!["ldap", "ad"],
+        "88" => vec!["ad"],
+        "53" => vec!["dns"],
+        "3306" => vec!["mysql"],
+        "1433" => vec!["mssql"],
+        "161" => vec!["snmp"],
+        "21" => vec!["ftp"],
+        "5985" | "5986" => vec!["winrm"],
+        _ => vec![],
+    }
 }
 
 fn derive_categories(commands: &[Command]) -> Vec<String> {

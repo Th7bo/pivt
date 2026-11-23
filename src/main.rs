@@ -114,6 +114,25 @@ fn snapshot(what: &str) {
             app.tick = 22;
             app.splash_start = 0;
         }
+        "parse" => {
+            app.mode = Mode::Normal;
+            app.logging = false;
+            app.vars.insert("RHOST".into(), "10.10.11.42".into());
+            app.vars.insert("URL".into(), String::new());
+            if let Ok(j) = runner::RunJob::spawn(
+                "nmap",
+                "printf 'PORT    STATE SERVICE\\n22/tcp  open  ssh\\n80/tcp  open  http\\n445/tcp open  microsoft-ds\\n389/tcp open  ldap\\n'",
+                18, 100, None,
+            ) {
+                app.runs.push(j);
+            }
+            app.show_run = true;
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            for r in &mut app.runs {
+                r.poll();
+            }
+            app.parse_scan();
+        }
         "gtfo" => {
             app.open_gtfo();
             app.gtfo_query = "find".into();
@@ -448,6 +467,7 @@ fn normal_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Char('f') => app.toggle_favorite(),
         KeyCode::Char('b') => app.toggle_bg(),
         KeyCode::Char('g') => app.open_gtfo(),
+        KeyCode::Char('P') => app.parse_scan(),
         KeyCode::Char('F') => app.flag_open(),
         KeyCode::Char('E') => app.export_writeup(),
         _ => {}

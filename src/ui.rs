@@ -1425,6 +1425,7 @@ fn draw_help(f: &mut Frame) {
         Line::from(Span::styled(" actions", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD))),
         row("enter", "fill from vars + copy (and log it)"),
         row("x", "run it live in the run pane (↓ tabs)"),
+        row("P", "parse scan output → PORTS + ✸ suggested"),
         row("e", "edit variables (split: this cmd / all)"),
         row("f", "pin ★ favorite (shows ★/⏱ categories)"),
         row("b", "toggle background: starfield ↔ flow field"),
