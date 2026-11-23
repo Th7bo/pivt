@@ -18,7 +18,8 @@ pub fn draw(f: &mut Frame, app: &App) {
     // Background behind the whole UI; widgets paint on top, leaving the effect
     // only in empty cells. Toggle with 'b'.
     if app.flow_bg {
-        crate::anim::draw_flow_app(f, area, app.tick, app.mouse);
+        let tint = category_style(app.current_category().unwrap_or("")).1;
+        crate::anim::draw_flow_app(f, area, app.tick, app.mouse, tint);
     } else {
         crate::anim::draw_field_app(f, area, app.tick);
         crate::anim::draw_shooting_star(f, area, app.tick, 260, false);
@@ -48,6 +49,34 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::AddLoot => draw_addloot(f, app),
         Mode::Flag => draw_flag(f, app),
         _ => {}
+    }
+
+    // flag-capture burst, drawn on top of everything
+    if let Some(p) = app.burst_progress() {
+        crate::anim::draw_burst_ring(f, area, p);
+        let flash = (app.tick / 2) % 2 == 0;
+        let msg = format!("🚩  {}  🚩", app.burst_label);
+        let mw = msg.chars().count() as u16 + 4;
+        let mh = 3u16;
+        let mx = area.x + area.width.saturating_sub(mw) / 2;
+        let my = area.y + area.height / 2 - 1;
+        let r = Rect::new(mx, my, mw.min(area.width), mh.min(area.height));
+        f.render_widget(Clear, r);
+        let color = if flash { OK } else { STAR_HI };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Double)
+            .border_style(Style::default().fg(color))
+            .style(Style::default().bg(BG));
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                msg,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )))
+            .alignment(Alignment::Center)
+            .block(block),
+            r,
+        );
     }
 }
 

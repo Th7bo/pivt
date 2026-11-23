@@ -113,6 +113,12 @@ fn snapshot(what: &str) {
             app.tick = 22;
             app.splash_start = 0;
         }
+        "burst" => {
+            app.mode = Mode::Normal;
+            app.tick = 100;
+            app.burst_start = Some(88); // ~40% progress
+            app.burst_label = "ROOT PWNED".into();
+        }
         "flag" => {
             app.mode = Mode::Normal;
             app.flag_open();

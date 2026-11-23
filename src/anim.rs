@@ -164,6 +164,19 @@ struct FlowCfg {
     colors: [Color; 4], // ramp colors dim→bright
 }
 
+fn rgb(c: Color) -> (u8, u8, u8) {
+    match c {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => (0x40, 0x50, 0x60),
+    }
+}
+fn blend(a: Color, b: Color, t: f32) -> Color {
+    let (ar, ag, ab) = rgb(a);
+    let (br, bg, bb) = rgb(b);
+    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t) as u8;
+    Color::Rgb(mix(ar, br), mix(ag, bg), mix(ab, bb))
+}
+
 /// Flowing ASCII noise field. `mouse` (cell coords) adds a ripple.
 fn flow(f: &mut Frame, area: Rect, tick: u64, mouse: Option<(u16, u16)>, cfg: &FlowCfg) {
     let t = tick as f32 * 0.05;
@@ -203,13 +216,18 @@ fn flow(f: &mut Frame, area: Rect, tick: u64, mouse: Option<(u16, u16)>, cfg: &F
     }
 }
 
-/// Subtle flow behind the live UI.
-pub fn draw_flow_app(f: &mut Frame, area: Rect, tick: u64, mouse: Option<(u16, u16)>) {
+/// Subtle flow behind the live UI, tinted toward `tint` (selected category hue).
+pub fn draw_flow_app(f: &mut Frame, area: Rect, tick: u64, mouse: Option<(u16, u16)>, tint: Color) {
     flow(f, area, tick, mouse, &FlowCfg {
         peak: 0.5,
         gain: 1.5,
         cutoff: 0.2,
-        colors: [STAR_FAINT, STAR_DIM, STAR_DIM, STAR_MID],
+        colors: [
+            blend(STAR_FAINT, tint, 0.18),
+            blend(STAR_DIM, tint, 0.22),
+            blend(STAR_DIM, tint, 0.30),
+            blend(STAR_MID, tint, 0.38),
+        ],
     });
 }
 
@@ -231,6 +249,31 @@ pub fn pulse(tick: u64) -> Color {
     let t = 6 - d; // bright at mid
     let lerp = |a: u8, b: u8| (a as u16 + ((b as i16 - a as i16) * t as i16 / 6) as u16).min(255) as u8;
     Color::Rgb(lerp(0x2d, 0xd4), lerp(0xd4, 0xf5), lerp(0xbf, 0xff))
+}
+
+/// Expanding ASCII shockwave for the flag-capture burst. `progress` 0..1.
+pub fn draw_burst_ring(f: &mut Frame, area: Rect, progress: f32) {
+    let cx = area.left() as f32 + area.width as f32 / 2.0;
+    let cy = area.top() as f32 + area.height as f32 / 2.0;
+    let aspect = 0.5f32;
+    let maxr = (area.width.max(area.height)) as f32 * 0.7;
+    let radius = progress * maxr;
+    let glyphs = ['·', '*', '✦', '✷', '#', '%'];
+    let col = blend(OK, STAR_HI, 1.0 - progress);
+    let buf = f.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let dx = x as f32 - cx;
+            let dy = (y as f32 - cy) / aspect;
+            let d = (dx * dx + dy * dy).sqrt();
+            if (d - radius).abs() < 1.8 {
+                let g = glyphs[((d * 0.5) as usize) % glyphs.len()];
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_char(g).set_fg(col);
+                }
+            }
+        }
+    }
 }
 
 // Big block banner for the splash.

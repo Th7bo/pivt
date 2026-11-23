@@ -177,6 +177,8 @@ pub struct App {
     // flag capture
     pub flag_is_root: bool,
     pub flag_buf: String,
+    pub burst_start: Option<u64>, // tick the flag-capture burst began
+    pub burst_label: String,
 
     // background effect
     pub flow_bg: bool,
@@ -278,6 +280,8 @@ impl App {
             recent,
             flag_is_root: false,
             flag_buf: String::new(),
+            burst_start: None,
+            burst_label: String::new(),
             flow_bg,
             mouse: None,
             pinger: Pinger::start(),
@@ -1065,8 +1069,22 @@ impl App {
         let target = self.vars.get("RHOST").cloned().unwrap_or_default();
         writeup::set_flag(self.active_room.as_ref(), &target, which, &value);
         let _ = clipboard::copy(&value);
+        self.burst_start = Some(self.tick);
+        self.burst_label = format!("{} PWNED", which.to_uppercase());
         self.set_status(format!("🚩 {which} flag saved + copied"));
         self.mode = Mode::Normal;
+    }
+
+    pub const BURST_LEN: u64 = 30;
+    /// Burst progress 0..1, or None when inactive.
+    pub fn burst_progress(&self) -> Option<f32> {
+        let start = self.burst_start?;
+        let d = self.tick.saturating_sub(start);
+        if d >= Self::BURST_LEN {
+            None
+        } else {
+            Some(d as f32 / Self::BURST_LEN as f32)
+        }
     }
 
     // ── writeup export ──
