@@ -110,6 +110,15 @@ pub const DEFAULT_VARS: &[&str] = &[
     "RHOST", "RPORT", "LHOST", "LPORT", "URL", "DOMAIN", "USER", "PASS", "WORDLIST", "FILE",
 ];
 
+/// Virtual category names (not real command categories).
+pub const FAV_CAT: &str = "favorites";
+pub const RECENT_CAT: &str = "recent";
+const RECENT_MAX: usize = 25;
+
+pub fn cmd_key(c: &Command) -> String {
+    format!("{}/{}", c.category, c.name)
+}
+
 pub struct App {
     pub commands: Vec<Command>,
     pub vars: BTreeMap<String, String>,
@@ -158,6 +167,10 @@ pub struct App {
     pub loot_idx: usize,
     pub loot_form: LootForm,
 
+    // favorites + recent (command keys "category/name")
+    pub favorites: Vec<String>,
+    pub recent: Vec<String>,
+
     matcher: SkimMatcherV2,
 }
 
@@ -165,6 +178,8 @@ impl App {
     pub fn new() -> Self {
         let commands = load_commands();
         let cfg = load_config();
+        let favorites = cfg.favorites.clone();
+        let recent = cfg.recent.clone();
         let mut vars: BTreeMap<String, String> = cfg.vars;
         for k in DEFAULT_VARS {
             vars.entry((*k).to_string()).or_default();
@@ -242,8 +257,11 @@ impl App {
             loot,
             loot_idx: 0,
             loot_form: LootForm::default(),
+            favorites,
+            recent,
             matcher: SkimMatcherV2::default(),
         };
+        app.refresh_categories();
         app.clamp();
         app
     }
@@ -273,6 +291,63 @@ impl App {
         self.categories.get(self.cat_idx).map(|s| s.as_str())
     }
 
+    /// Rebuild the category list: virtual favorites/recent (when non-empty)
+    /// followed by the real categories.
+    pub fn refresh_categories(&mut self) {
+        let mut v = Vec::new();
+        if !self.favorites.is_empty() {
+            v.push(FAV_CAT.to_string());
+        }
+        if !self.recent.is_empty() {
+            v.push(RECENT_CAT.to_string());
+        }
+        v.extend(derive_categories(&self.commands));
+        self.categories = v;
+    }
+
+    fn command_by_key(&self, key: &str) -> Option<usize> {
+        self.commands.iter().position(|c| cmd_key(c) == key)
+    }
+
+    pub fn category_count(&self, name: &str) -> usize {
+        match name {
+            FAV_CAT => self.favorites.len(),
+            RECENT_CAT => self.recent.len(),
+            _ => self.commands.iter().filter(|c| c.category == name).count(),
+        }
+    }
+
+    pub fn is_favorite_cmd(&self, c: &Command) -> bool {
+        self.favorites.contains(&cmd_key(c))
+    }
+
+    pub fn toggle_favorite(&mut self) {
+        if let Some(c) = self.selected_cmd() {
+            let key = cmd_key(c);
+            if let Some(pos) = self.favorites.iter().position(|k| k == &key) {
+                self.favorites.remove(pos);
+                self.set_status("☆ unpinned");
+            } else {
+                self.favorites.push(key);
+                self.set_status("★ pinned to favorites");
+            }
+            let in_virtual =
+                matches!(self.current_category(), Some(FAV_CAT));
+            self.refresh_categories();
+            self.persist_config();
+            if in_virtual {
+                self.clamp();
+            }
+        }
+    }
+
+    fn push_recent(&mut self, key: String) {
+        self.recent.retain(|k| k != &key);
+        self.recent.insert(0, key);
+        self.recent.truncate(RECENT_MAX);
+        self.refresh_categories();
+    }
+
     /// Indices into self.commands currently visible (after search / category filter).
     pub fn visible(&self) -> Vec<usize> {
         if !self.search.is_empty() {
@@ -294,15 +369,27 @@ impl App {
                 .collect();
             scored.sort_by(|a, b| b.0.cmp(&a.0));
             scored.into_iter().map(|(_, i)| i).collect()
-        } else if let Some(cat) = self.current_category() {
-            self.commands
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| c.category == cat)
-                .map(|(i, _)| i)
-                .collect()
         } else {
-            Vec::new()
+            match self.current_category() {
+                Some(FAV_CAT) => self
+                    .favorites
+                    .iter()
+                    .filter_map(|k| self.command_by_key(k))
+                    .collect(),
+                Some(RECENT_CAT) => self
+                    .recent
+                    .iter()
+                    .filter_map(|k| self.command_by_key(k))
+                    .collect(),
+                Some(cat) => self
+                    .commands
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| c.category == cat)
+                    .map(|(i, _)| i)
+                    .collect(),
+                None => Vec::new(),
+            }
         }
     }
 
@@ -362,8 +449,8 @@ impl App {
     // ── actions ──
     pub fn copy_selected(&mut self) {
         let Some(filled) = self.filled_selected() else { return };
-        let (name, category) = match self.selected_cmd() {
-            Some(c) => (c.name.clone(), c.category.clone()),
+        let (name, category, key) = match self.selected_cmd() {
+            Some(c) => (c.name.clone(), c.category.clone(), cmd_key(c)),
             None => return,
         };
         match clipboard::copy(&filled) {
@@ -384,6 +471,8 @@ impl App {
                     );
                     msg.push_str(&format!(" · logged → {}", short_path(&path)));
                 }
+                self.push_recent(key);
+                self.persist_config();
                 self.set_status(msg);
             }
             Err(e) => self.set_status(format!("✗ copy failed: {e}")),
@@ -403,6 +492,8 @@ impl App {
     pub fn persist_config(&self) {
         let cfg = Config {
             vars: self.vars.clone(),
+            favorites: self.favorites.clone(),
+            recent: self.recent.clone(),
         };
         let _ = save_config(&cfg);
         // keep the shell kit's target file + room .target in sync with RHOST
@@ -496,14 +587,14 @@ impl App {
         self.add.field = (self.add.field + 3) % 4;
     }
     pub fn add_save(&mut self) -> bool {
-        let cat = self.add.category.trim();
-        let name = self.add.name.trim();
-        let tmpl = self.add.template.trim();
+        let cat = self.add.category.trim().to_string();
+        let name = self.add.name.trim().to_string();
+        let tmpl = self.add.template.trim().to_string();
         if cat.is_empty() || name.is_empty() || tmpl.is_empty() {
             self.set_status("category, name and template are required");
             return false;
         }
-        let new_phs = extract_placeholders(tmpl);
+        let new_phs = extract_placeholders(&tmpl);
         let cmd = Command {
             category: cat.to_string(),
             name: name.to_string(),
@@ -527,8 +618,9 @@ impl App {
         for ph in new_phs {
             self.vars.entry(ph).or_default();
         }
-        self.categories = derive_categories(&self.commands);
-        if let Some(pos) = self.categories.iter().position(|c| c == cat) {
+        let cat_owned = cat.to_string();
+        self.refresh_categories();
+        if let Some(pos) = self.categories.iter().position(|c| c == &cat_owned) {
             self.cat_idx = pos;
         }
         let _ = save_user_commands(&self.commands);
@@ -544,7 +636,7 @@ impl App {
             if self.commands[idx].user {
                 let name = self.commands[idx].name.clone();
                 self.commands.remove(idx);
-                self.categories = derive_categories(&self.commands);
+                self.refresh_categories();
                 let _ = save_user_commands(&self.commands);
                 self.clamp();
                 self.set_status(format!("✗ deleted '{name}'"));
@@ -715,6 +807,8 @@ impl App {
         if spawned == 0 {
             return;
         }
+        self.push_recent(cmd_key(&cmd));
+        self.persist_config();
         self.show_run = true;
         self.run_tab = first_new;
         self.focus = Focus::Run;

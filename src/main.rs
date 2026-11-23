@@ -374,6 +374,7 @@ fn normal_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Char('w') => app.note_open(),
         KeyCode::Char('o') => app.open_active_notes(),
         KeyCode::Char('L') => app.open_loot(),
+        KeyCode::Char('f') => app.toggle_favorite(),
         _ => {}
     }
 }

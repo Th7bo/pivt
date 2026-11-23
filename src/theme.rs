@@ -47,6 +47,8 @@ pub fn category_style(name: &str) -> (char, Color) {
         "forensics" => ('⌕', Color::Rgb(0xf0, 0xb4, 0x57)),
         "pwn" => ('⚑', Color::Rgb(0xf8, 0x72, 0x72)),
         "win" => ('❖', Color::Rgb(0x60, 0xa5, 0xfa)),
+        "favorites" => ('★', Color::Rgb(0xf0, 0xb4, 0x57)),
+        "recent" => ('⏱', Color::Rgb(0x8f, 0xa6, 0xbd)),
         _ => ('◆', ACCENT),
     }
 }

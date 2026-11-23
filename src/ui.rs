@@ -338,7 +338,7 @@ fn draw_categories(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            let count = app.commands.iter().filter(|x| &x.category == c).count();
+            let count = app.category_count(c);
             let sel = i == app.cat_idx && !searching;
             let (glyph, color) = category_style(c);
             let mark = if sel {
@@ -400,8 +400,11 @@ fn draw_commands(f: &mut Frame, app: &App, area: Rect) {
                         .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
                 ),
             ];
+            if app.is_favorite_cmd(c) {
+                spans.push(Span::styled("  ★", Style::default().fg(Color::Rgb(0xf0, 0xb4, 0x57))));
+            }
             if c.user {
-                spans.push(Span::styled("  ★", Style::default().fg(ACCENT2)));
+                spans.push(Span::styled("  ✎", Style::default().fg(ACCENT2)));
             }
             if !app.search.is_empty() {
                 spans.push(Span::styled(
@@ -1235,6 +1238,7 @@ fn draw_help(f: &mut Frame) {
         row("enter", "fill from vars + copy (and log it)"),
         row("x", "run it live in the run pane (↓ tabs)"),
         row("e", "edit variables (split: this cmd / all)"),
+        row("f", "pin ★ favorite (shows ★/⏱ categories)"),
         row("a / d", "add / delete a command"),
         row("/", "fuzzy search across all commands"),
         row("q / esc", "quit"),
