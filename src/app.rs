@@ -29,6 +29,7 @@ pub enum Mode {
     NewRoom,
     Loot,
     AddLoot,
+    Flag,
 }
 
 #[derive(Default)]
@@ -171,6 +172,10 @@ pub struct App {
     pub favorites: Vec<String>,
     pub recent: Vec<String>,
 
+    // flag capture
+    pub flag_is_root: bool,
+    pub flag_buf: String,
+
     matcher: SkimMatcherV2,
 }
 
@@ -259,6 +264,8 @@ impl App {
             loot_form: LootForm::default(),
             favorites,
             recent,
+            flag_is_root: false,
+            flag_buf: String::new(),
             matcher: SkimMatcherV2::default(),
         };
         app.refresh_categories();
@@ -990,6 +997,40 @@ impl App {
         self.loot_persist();
         self.set_status(format!("✓ loot saved → {}", short_path(&self.loot_file())));
         true
+    }
+
+    // ── flags ──
+    pub fn flag_open(&mut self) {
+        self.flag_is_root = false;
+        self.flag_buf.clear();
+        self.mode = Mode::Flag;
+    }
+    pub fn flag_toggle_which(&mut self) {
+        self.flag_is_root = !self.flag_is_root;
+    }
+    pub fn flag_save(&mut self) {
+        let value = self.flag_buf.trim().to_string();
+        if value.is_empty() {
+            self.mode = Mode::Normal;
+            return;
+        }
+        let which = if self.flag_is_root { "root" } else { "user" };
+        let target = self.vars.get("RHOST").cloned().unwrap_or_default();
+        writeup::set_flag(self.active_room.as_ref(), &target, which, &value);
+        let _ = clipboard::copy(&value);
+        self.set_status(format!("🚩 {which} flag saved + copied"));
+        self.mode = Mode::Normal;
+    }
+
+    // ── writeup export ──
+    pub fn export_writeup(&mut self) {
+        let target = self.vars.get("RHOST").cloned().unwrap_or_default();
+        let domain = self.vars.get("DOMAIN").cloned().unwrap_or_default();
+        let lhost = self.vars.get("LHOST").cloned().unwrap_or_default();
+        match writeup::export(self.active_room.as_ref(), &target, &domain, &lhost, &self.loot) {
+            Ok(p) => self.set_status(format!("✓ writeup exported → {}", short_path(&p))),
+            Err(e) => self.set_status(format!("✗ export failed: {e}")),
+        }
     }
 
     // ── inline variable editing (preview pane) ──

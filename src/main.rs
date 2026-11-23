@@ -98,6 +98,12 @@ fn snapshot(what: &str) {
             app.loot_form.user = "svc-web".into();
             app.loot_form.pass = "Summer2024!".into();
         }
+        "flag" => {
+            app.mode = Mode::Normal;
+            app.flag_open();
+            app.flag_is_root = true;
+            app.flag_buf = "a1b2c3d4e5f6...".into();
+        }
         "vars" => app.mode = Mode::Vars,
         "add" => {
             app.add_open();
@@ -220,6 +226,20 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::NewRoom => newroom_keys(app, key),
         Mode::Loot => loot_keys(app, key),
         Mode::AddLoot => addloot_keys(app, key),
+        Mode::Flag => flag_keys(app, key),
+    }
+}
+
+fn flag_keys(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => app.mode = Mode::Normal,
+        KeyCode::Tab | KeyCode::Up | KeyCode::Down => app.flag_toggle_which(),
+        KeyCode::Enter => app.flag_save(),
+        KeyCode::Backspace => {
+            app.flag_buf.pop();
+        }
+        KeyCode::Char(c) => app.flag_buf.push(c),
+        _ => {}
     }
 }
 
@@ -375,6 +395,8 @@ fn normal_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Char('o') => app.open_active_notes(),
         KeyCode::Char('L') => app.open_loot(),
         KeyCode::Char('f') => app.toggle_favorite(),
+        KeyCode::Char('F') => app.flag_open(),
+        KeyCode::Char('E') => app.export_writeup(),
         _ => {}
     }
 }

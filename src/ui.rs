@@ -42,6 +42,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::Note => draw_note(f, app),
         Mode::Loot => draw_loot(f, app),
         Mode::AddLoot => draw_addloot(f, app),
+        Mode::Flag => draw_flag(f, app),
         _ => {}
     }
 }
@@ -693,6 +694,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Mode::NewRoom => &[("⇥", "field"), ("^s", "create"), ("esc", "cancel")],
         Mode::Loot => &[("↑↓", "move"), ("⏎", "use"), ("a", "add"), ("d", "del"), ("esc", "close")],
         Mode::AddLoot => &[("⇥", "field"), ("^s", "save"), ("esc", "cancel")],
+        Mode::Flag => &[("⇥", "user/root"), ("type", "value"), ("⏎", "save+copy"), ("esc", "cancel")],
         Mode::Normal => &[
             ("↹", "pane"), ("⏎", "copy"), ("x", "run"), ("e", "vars"),
             ("c", "room"), ("L", "loot"), ("w", "note"), ("/", "find"), ("?", "help"),
@@ -814,6 +816,58 @@ fn draw_vars(f: &mut Frame, app: &App) {
     }
 
     f.render_widget(List::new(items), inner);
+}
+
+fn draw_flag(f: &mut Frame, app: &App) {
+    let area = centered(f.area(), 60, 6);
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(OK))
+        .title(Span::styled(" capture flag ", Style::default().fg(OK).add_modifier(Modifier::BOLD)))
+        .style(Style::default().bg(PANEL));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)])
+        .split(inner);
+
+    // which selector
+    let pill = |label: &str, on: bool| {
+        if on {
+            Span::styled(format!(" {label} "), Style::default().fg(BG).bg(OK).add_modifier(Modifier::BOLD))
+        } else {
+            Span::styled(format!(" {label} "), Style::default().fg(DIM))
+        }
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("flag: ", Style::default().fg(DIM)),
+            pill("user", !app.flag_is_root),
+            Span::raw(" "),
+            pill("root", app.flag_is_root),
+            Span::styled("   (⇥ toggle)", Style::default().fg(DIM)),
+        ])),
+        rows[0],
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("🚩 ", Style::default().fg(OK)),
+            Span::styled(app.flag_buf.clone(), Style::default().fg(FG).add_modifier(Modifier::BOLD)),
+            Span::styled("▏", Style::default().fg(ACCENT)),
+        ])),
+        rows[1],
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "⏎ writes to room notes Flags table + log, copies to clipboard",
+            Style::default().fg(DIM),
+        ))
+        .wrap(Wrap { trim: true }),
+        rows[2],
+    );
 }
 
 fn draw_loot(f: &mut Frame, app: &App) {
@@ -1252,6 +1306,7 @@ fn draw_help(f: &mut Frame) {
         row("c", "rooms: pick/activate, n=new, o=notes"),
         row("L", "loot: capture creds → ⏎ load USER/PASS/HASH"),
         row("w", "add a writeup note to the log"),
+        row("F / E", "capture flag → notes · export writeup.md"),
         row("o", "open active room's notes in $EDITOR"),
         Line::from(""),
         Line::from(Span::styled(
