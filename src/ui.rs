@@ -15,10 +15,14 @@ pub fn draw(f: &mut Frame, app: &App) {
         return;
     }
 
-    // Calm, slowly-drifting starfield behind the whole UI; widgets paint on top,
-    // leaving stars only in empty cells. A shooting star streaks by rarely.
-    crate::anim::draw_field_app(f, area, app.tick);
-    crate::anim::draw_shooting_star(f, area, app.tick, 260, false);
+    // Background behind the whole UI; widgets paint on top, leaving the effect
+    // only in empty cells. Toggle with 'b'.
+    if app.flow_bg {
+        crate::anim::draw_flow_app(f, area, app.tick, app.mouse);
+    } else {
+        crate::anim::draw_field_app(f, area, app.tick);
+        crate::anim::draw_shooting_star(f, area, app.tick, 260, false);
+    }
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1179,9 +1183,13 @@ fn draw_field(f: &mut Frame, area: Rect, label: &str, val: &str, active: bool) {
 
 fn draw_splash(f: &mut Frame, app: &App, area: Rect) {
     let frame = app.splash_frame();
-    // dense, louder starfield + a shooting star
-    crate::anim::draw_field_splash(f, area, app.tick);
-    crate::anim::draw_shooting_star(f, area, app.tick, 44, true);
+    // bold background behind the banner
+    if app.flow_bg {
+        crate::anim::draw_flow_splash(f, area, app.tick, app.mouse);
+    } else {
+        crate::anim::draw_field_splash(f, area, app.tick);
+        crate::anim::draw_shooting_star(f, area, app.tick, 44, true);
+    }
 
     let banner = crate::anim::BANNER;
     let w = banner.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
@@ -1263,7 +1271,7 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_help(f: &mut Frame) {
-    let area = centered(f.area(), 62, 28);
+    let area = centered(f.area(), 62, 30);
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1293,6 +1301,7 @@ fn draw_help(f: &mut Frame) {
         row("x", "run it live in the run pane (↓ tabs)"),
         row("e", "edit variables (split: this cmd / all)"),
         row("f", "pin ★ favorite (shows ★/⏱ categories)"),
+        row("b", "toggle background: starfield ↔ flow field"),
         row("a / d", "add / delete a command"),
         row("/", "fuzzy search across all commands"),
         row("q / esc", "quit"),

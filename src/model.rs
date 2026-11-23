@@ -55,6 +55,9 @@ pub struct Config {
     /// Recently copied/run command keys, most-recent first.
     #[serde(default)]
     pub recent: Vec<String>,
+    /// Background style: true = flowing ASCII field, false = starfield.
+    #[serde(default)]
+    pub flow_bg: bool,
     #[serde(default)]
     pub vars: BTreeMap<String, String>,
 }

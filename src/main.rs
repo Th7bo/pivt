@@ -12,7 +12,10 @@ mod writeup;
 
 use app::{App, Focus, Mode};
 use crossterm::{
-    event::{self, DisableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -98,6 +101,17 @@ fn snapshot(what: &str) {
             app.loot_form.user = "svc-web".into();
             app.loot_form.pass = "Summer2024!".into();
         }
+        "flow" => {
+            app.mode = Mode::Normal;
+            app.flow_bg = true;
+            app.tick = 120;
+            app.mouse = Some((70, 18));
+        }
+        "flowsplash" => {
+            app.flow_bg = true;
+            app.tick = 22;
+            app.splash_start = 0;
+        }
         "flag" => {
             app.mode = Mode::Normal;
             app.flag_open();
@@ -165,7 +179,19 @@ fn restore(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> 
 fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::Result<()> {
     let tick_rate = Duration::from_millis(50); // ~20 fps
     let mut last_tick = Instant::now();
+    let mut mouse_on = false;
     loop {
+        // mouse capture only while the flow background wants ripples, so it
+        // doesn't interfere with terminal text selection otherwise.
+        if app.flow_bg != mouse_on {
+            if app.flow_bg {
+                let _ = execute!(terminal.backend_mut(), EnableMouseCapture);
+            } else {
+                let _ = execute!(terminal.backend_mut(), DisableMouseCapture);
+                app.mouse = None;
+            }
+            mouse_on = app.flow_bg;
+        }
         terminal.draw(|f| ui::draw(f, app))?;
         if app.should_quit {
             return Ok(());
@@ -173,10 +199,10 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::
         // Starfield animates continuously, so always pace to the tick rate.
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    handle_key(app, key);
-                }
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(app, key),
+                Event::Mouse(me) => app.mouse = Some((me.column, me.row)),
+                _ => {}
             }
         }
         if let Some(path) = app.pending_editor.take() {
@@ -395,6 +421,7 @@ fn normal_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Char('o') => app.open_active_notes(),
         KeyCode::Char('L') => app.open_loot(),
         KeyCode::Char('f') => app.toggle_favorite(),
+        KeyCode::Char('b') => app.toggle_bg(),
         KeyCode::Char('F') => app.flag_open(),
         KeyCode::Char('E') => app.export_writeup(),
         _ => {}

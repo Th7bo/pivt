@@ -176,6 +176,10 @@ pub struct App {
     pub flag_is_root: bool,
     pub flag_buf: String,
 
+    // background effect
+    pub flow_bg: bool,
+    pub mouse: Option<(u16, u16)>,
+
     matcher: SkimMatcherV2,
 }
 
@@ -185,6 +189,7 @@ impl App {
         let cfg = load_config();
         let favorites = cfg.favorites.clone();
         let recent = cfg.recent.clone();
+        let flow_bg = cfg.flow_bg;
         let mut vars: BTreeMap<String, String> = cfg.vars;
         for k in DEFAULT_VARS {
             vars.entry((*k).to_string()).or_default();
@@ -266,6 +271,8 @@ impl App {
             recent,
             flag_is_root: false,
             flag_buf: String::new(),
+            flow_bg,
+            mouse: None,
             matcher: SkimMatcherV2::default(),
         };
         app.refresh_categories();
@@ -427,6 +434,12 @@ impl App {
         self.status = s.into();
     }
 
+    pub fn toggle_bg(&mut self) {
+        self.flow_bg = !self.flow_bg;
+        self.persist_config();
+        self.set_status(if self.flow_bg { "background: flow field" } else { "background: starfield" });
+    }
+
     // ── navigation ──
     pub fn next_cat(&mut self) {
         if !self.categories.is_empty() {
@@ -501,6 +514,7 @@ impl App {
             vars: self.vars.clone(),
             favorites: self.favorites.clone(),
             recent: self.recent.clone(),
+            flow_bg: self.flow_bg,
         };
         let _ = save_config(&cfg);
         // keep the shell kit's target file + room .target in sync with RHOST
