@@ -17,7 +17,7 @@ use app::{App, Focus, Mode};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers,
+        KeyModifiers, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -216,16 +216,18 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::
     let mut last_tick = Instant::now();
     let mut mouse_on = false;
     loop {
-        // mouse capture only while the flow background wants ripples, so it
-        // doesn't interfere with terminal text selection otherwise.
-        if app.flow_bg != mouse_on {
-            if app.flow_bg {
+        // Capture the mouse for flow-field ripples and for scroll-wheel over the
+        // run pane (so you can scroll output even while typing into it). Off
+        // otherwise, so normal terminal text selection still works.
+        let want_mouse = app.flow_bg || app.show_run;
+        if want_mouse != mouse_on {
+            if want_mouse {
                 let _ = execute!(terminal.backend_mut(), EnableMouseCapture);
             } else {
                 let _ = execute!(terminal.backend_mut(), DisableMouseCapture);
                 app.mouse = None;
             }
-            mouse_on = app.flow_bg;
+            mouse_on = want_mouse;
         }
         terminal.draw(|f| ui::draw(f, app))?;
         if app.should_quit {
@@ -236,7 +238,12 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::
         if event::poll(timeout)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(app, key),
-                Event::Mouse(me) => app.mouse = Some((me.column, me.row)),
+                Event::Mouse(me) => match me.kind {
+                    // wheel scrolls the run pane — works even while interacting
+                    MouseEventKind::ScrollUp => app.run_scroll_up(3),
+                    MouseEventKind::ScrollDown => app.run_scroll_down(3),
+                    _ => app.mouse = Some((me.column, me.row)),
+                },
                 _ => {}
             }
         }
