@@ -17,6 +17,7 @@ dirs = "5"
 fuzzy-matcher = "0.3"
 portable-pty = "0.8"
 vt100 = "0.15"
+discord-rich-presence = "=1.1.0"
 
 [profile.release]
 opt-level = 3

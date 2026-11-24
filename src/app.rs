@@ -1,3 +1,4 @@
+use crate::discord::{DiscordRpc, Presence};
 use crate::loot::{self, Cred};
 use crate::model::*;
 use crate::ping::{Ping, Pinger};
@@ -195,7 +196,18 @@ pub struct App {
     // live target status
     pinger: Pinger,
     pub box_started: Option<Instant>,
+    /// Unix epoch of the box start (mirrors box_started for Discord timestamps).
+    box_epoch: Option<i64>,
     last_rhost: String,
+
+    // flag counter (for Discord presence)
+    pub flags_captured: usize,
+
+    // discord rich presence
+    discord: Option<DiscordRpc>,
+    pub discord_rpc: bool,
+    pub discord_app_id: String,
+    last_rpc_tick: u64,
 
     matcher: SkimMatcherV2,
 }
@@ -207,6 +219,14 @@ impl App {
         let favorites = cfg.favorites.clone();
         let recent = cfg.recent.clone();
         let flow_bg = cfg.flow_bg;
+        let discord_rpc = cfg.discord_rpc;
+        let discord_app_id = cfg.discord_app_id.clone();
+        // Connect to Discord only when opted in and an app id is configured.
+        let discord = if discord_rpc && !discord_app_id.is_empty() {
+            Some(DiscordRpc::start(discord_app_id.clone()))
+        } else {
+            None
+        };
         let mut vars: BTreeMap<String, String> = cfg.vars;
         for k in DEFAULT_VARS {
             vars.entry((*k).to_string()).or_default();
@@ -297,7 +317,13 @@ impl App {
             mouse: None,
             pinger: Pinger::start(),
             box_started: None,
+            box_epoch: None,
             last_rhost: String::new(),
+            flags_captured: 0,
+            discord,
+            discord_rpc,
+            discord_app_id,
+            last_rpc_tick: 0,
             matcher: SkimMatcherV2::default(),
         };
         app.refresh_categories();
@@ -329,8 +355,54 @@ impl App {
         if rhost != self.last_rhost {
             self.last_rhost = rhost.clone();
             self.pinger.set_target(&rhost);
-            self.box_started = if rhost.is_empty() { None } else { Some(Instant::now()) };
+            if rhost.is_empty() {
+                self.box_started = None;
+                self.box_epoch = None;
+            } else {
+                self.box_started = Some(Instant::now());
+                // compute the epoch once, here, so Discord's elapsed clock is stable
+                self.box_epoch = Some(crate::discord::now_unix());
+            }
         }
+        // Rich Presence: refresh about every 5s (not every ~50ms tick).
+        if self.discord.is_some()
+            && (self.last_rpc_tick == 0 || self.tick.saturating_sub(self.last_rpc_tick) >= 100)
+        {
+            self.last_rpc_tick = self.tick;
+            self.push_discord();
+        }
+    }
+
+    /// Build the current presence and hand it to the background RPC thread.
+    fn push_discord(&self) {
+        let Some(d) = &self.discord else { return };
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+        let details = match &self.active_room {
+            Some(r) => format!("{} · {} flag{}", r.name, self.flags_captured, plural(self.flags_captured)),
+            None => "browsing commands".to_string(),
+        };
+        let rhost = self.vars.get("RHOST").cloned().unwrap_or_default();
+        let state = if rhost.is_empty() {
+            "no target set".to_string()
+        } else {
+            let status = match self.ping().up {
+                Some(true) => "up",
+                Some(false) => "down",
+                None => "…",
+            };
+            let mut s = format!("◎ {rhost} {status}");
+            if let Some(el) = self.box_elapsed() {
+                s.push_str(&format!(" · ⏱ {el}"));
+            }
+            s
+        };
+        d.update(Presence {
+            details,
+            state,
+            start_epoch: self.box_epoch,
+            large_image: "pivt".to_string(),
+            large_text: "pivt — ctf toolkit".to_string(),
+        });
     }
 
     pub fn ping(&self) -> Ping {
@@ -497,6 +569,26 @@ impl App {
         self.set_status(if self.flow_bg { "background: flow field" } else { "background: starfield" });
     }
 
+    /// Toggle Discord Rich Presence on/off (persisted).
+    pub fn toggle_discord(&mut self) {
+        self.discord_rpc = !self.discord_rpc;
+        self.persist_config();
+        if self.discord_rpc {
+            if self.discord_app_id.is_empty() {
+                self.set_status("discord rpc on — set discord_app_id in ~/.config/pivt/config.toml");
+            } else {
+                if self.discord.is_none() {
+                    self.discord = Some(DiscordRpc::start(self.discord_app_id.clone()));
+                }
+                self.last_rpc_tick = 0; // push presence promptly
+                self.set_status("discord rich presence: on");
+            }
+        } else {
+            self.discord = None; // Drop clears the activity + closes the pipe
+            self.set_status("discord rich presence: off");
+        }
+    }
+
     // ── navigation ──
     pub fn next_cat(&mut self) {
         if !self.categories.is_empty() {
@@ -572,6 +664,8 @@ impl App {
             favorites: self.favorites.clone(),
             recent: self.recent.clone(),
             flow_bg: self.flow_bg,
+            discord_rpc: self.discord_rpc,
+            discord_app_id: self.discord_app_id.clone(),
         };
         let _ = save_config(&cfg);
         // keep the shell kit's target file + room .target in sync with RHOST
@@ -1170,6 +1264,7 @@ impl App {
         let target = self.vars.get("RHOST").cloned().unwrap_or_default();
         writeup::set_flag(self.active_room.as_ref(), &target, which, &value);
         let _ = clipboard::copy(&value);
+        self.flags_captured += 1;
         self.burst_start = Some(self.tick);
         self.burst_label = format!("{} PWNED", which.to_uppercase());
         self.set_status(format!("🚩 {which} flag saved + copied"));
