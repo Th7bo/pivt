@@ -848,3 +848,10 @@ name = "pwncat connect"
 description = "connect to a bind shell and stabilize it"
 template = "pwncat-cs <RHOST>:<RPORT>"
 tags = ["shell", "pwncat", "bind"]
+
+[[command]]
+category = "shells"
+name = "penelope listener"
+description = "catch + auto-upgrade; session menu, up/download, logging"
+template = "penelope <LPORT>"
+tags = ["shell", "listener", "penelope", "upgrade"]
