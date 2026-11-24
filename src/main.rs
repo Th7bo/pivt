@@ -332,6 +332,9 @@ fn loot_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Enter | KeyCode::Char('u') => app.loot_use(),
         KeyCode::Char('a') => app.add_loot_open(),
         KeyCode::Char('d') => app.loot_delete(),
+        KeyCode::Char('y') => app.loot_copy_pass(),
+        KeyCode::Char('Y') => app.loot_copy_field(2), // hash
+        KeyCode::Char('U') => app.loot_copy_field(0), // user
         _ => {}
     }
 }

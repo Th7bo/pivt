@@ -18,19 +18,31 @@ lives on a background thread and never blocks or crashes the UI.
 
 ### Enabling it
 
-1. Create a Discord application at
-   <https://discord.com/developers/applications> and copy its **Application ID**.
-2. In **Rich Presence → Art Assets**, upload an image asset named **`pivt`**
-   (this is the large image shown in the presence).
-3. Put the Application ID into `~/.config/pivt/config.toml`:
+Press **`D`** (Shift-D) in Normal mode, or set it in `~/.config/pivt/config.toml`:
 
-   ```toml
-   discord_rpc = true
-   discord_app_id = "123456789012345678"
-   ```
+```toml
+discord_rpc = true
+```
 
-   You can also flip `discord_rpc` from inside the app by pressing **`D`**
-   (Shift-D) in Normal mode. The setting is persisted. If you toggle it on
-   without an `discord_app_id` set, pivt tells you to add one.
+The setting is persisted. pivt ships with its own Discord application
+(**pivt**, id `1574922609542303924`, art asset `pivt`), so nothing else is needed.
+
+To use your own application instead, create one at
+<https://discord.com/developers/applications>, upload an art asset named
+**`pivt`** under **Rich Presence → Art Assets** (`assets/icon-p-square@2x.png`
+works), and set its Application ID:
+
+```toml
+discord_app_id = "123456789012345678"
+```
+
+The activity shows as **Competing in pivt**. Both text lines rotate about every
+15s through whatever has something to say: room + flags, running jobs, looted
+creds, current category (top), and target status, open ports (bottom).
+
+Buttons (Discord hides your own buttons from you; others see them):
+
+- **view room** links `https://tryhackme.com/room/<active room>` when a room is active.
+- **get pivt** appears when `discord_link = "https://…"` is set in the config.
 
 The presence refreshes about every 5 seconds while pivt runs.

@@ -44,6 +44,9 @@ struct CommandFileOut<'a> {
     commands: Vec<&'a Command>,
 }
 
+/// The official pivt Discord application (name "pivt", art asset `pivt`).
+pub const DEFAULT_DISCORD_APP_ID: &str = "1574922609542303924";
+
 /// Config = the persisted variable values.
 // NOTE: array fields are declared BEFORE `vars` so toml serializes them first;
 // a TOML table must come after top-level keys or those keys nest under it.
@@ -61,9 +64,13 @@ pub struct Config {
     /// Enable Discord Rich Presence (opt-in).
     #[serde(default)]
     pub discord_rpc: bool,
-    /// Discord application (client) id for Rich Presence; empty = disabled.
+    /// Discord application (client) id for Rich Presence; empty = use the
+    /// bundled pivt app ([`DEFAULT_DISCORD_APP_ID`]).
     #[serde(default)]
     pub discord_app_id: String,
+    /// Optional URL for a "get pivt" button on the Discord presence.
+    #[serde(default)]
+    pub discord_link: String,
     #[serde(default)]
     pub vars: BTreeMap<String, String>,
 }

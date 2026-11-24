@@ -1,4 +1,8 @@
 use crate::discord::{DiscordRpc, Presence};
+
+/// Ticks (~50ms each) between rotating the presence text lines. ~15s keeps us
+/// well inside Discord's 5-updates-per-20s rate limit.
+const RPC_ROTATE_TICKS: u64 = 300;
 use crate::loot::{self, Cred};
 use crate::model::*;
 use crate::ping::{Ping, Pinger};
@@ -208,6 +212,8 @@ pub struct App {
     discord: Option<DiscordRpc>,
     pub discord_rpc: bool,
     pub discord_app_id: String,
+    /// Optional project URL for the "get pivt" presence button.
+    pub discord_link: String,
     last_rpc_tick: u64,
 
     matcher: SkimMatcherV2,
@@ -221,7 +227,11 @@ impl App {
         let recent = cfg.recent.clone();
         let flow_bg = cfg.flow_bg;
         let discord_rpc = cfg.discord_rpc;
-        let discord_app_id = cfg.discord_app_id.clone();
+        let discord_app_id = if cfg.discord_app_id.trim().is_empty() {
+            crate::model::DEFAULT_DISCORD_APP_ID.to_string()
+        } else {
+            cfg.discord_app_id.clone()
+        };
         // Connect to Discord only when opted in and an app id is configured.
         let discord = if discord_rpc && !discord_app_id.is_empty() {
             Some(DiscordRpc::start(discord_app_id.clone()))
@@ -325,6 +335,7 @@ impl App {
             discord,
             discord_rpc,
             discord_app_id,
+            discord_link: cfg.discord_link.clone(),
             last_rpc_tick: 0,
             matcher: SkimMatcherV2::default(),
         };
@@ -376,15 +387,35 @@ impl App {
     }
 
     /// Build the current presence and hand it to the background RPC thread.
+    ///
+    /// Discord only shows two text lines, so each line rotates through every
+    /// candidate that currently has something to say (one step per
+    /// [`RPC_ROTATE_TICKS`]). A line with a single candidate stays put.
     fn push_discord(&self) {
         let Some(d) = &self.discord else { return };
         let plural = |n: usize| if n == 1 { "" } else { "s" };
-        let details = match &self.active_room {
+
+        // top line candidates
+        let mut details = vec![match &self.active_room {
             Some(r) => format!("{} · {} flag{}", r.name, self.flags_captured, plural(self.flags_captured)),
             None => "browsing commands".to_string(),
-        };
+        }];
+        let running = self.runs.iter().filter(|j| j.is_running()).count();
+        if running > 0 {
+            details.push(format!("⚡ {running} job{} running", plural(running)));
+        }
+        if !self.loot.is_empty() {
+            let n = self.loot.len();
+            details.push(format!("🔑 {n} cred{} looted", plural(n)));
+        }
+        if let Some(cat) = self.current_category() {
+            let (glyph, _) = crate::theme::category_style(cat);
+            details.push(format!("{glyph} in {cat}"));
+        }
+
+        // bottom line candidates
         let rhost = self.vars.get("RHOST").cloned().unwrap_or_default();
-        let state = if rhost.is_empty() {
+        let mut states = vec![if rhost.is_empty() {
             "no target set".to_string()
         } else {
             let status = match self.ping().up {
@@ -397,13 +428,35 @@ impl App {
                 s.push_str(&format!(" · ⏱ {el}"));
             }
             s
-        };
+        }];
+        if let Some(ports) = self.vars.get("PORTS").filter(|p| !p.trim().is_empty()) {
+            let mut line = format!("open ports {ports}");
+            if line.chars().count() > 120 {
+                line = line.chars().take(119).collect::<String>() + "…";
+            }
+            states.push(line);
+        }
+
+        let step = (self.tick / RPC_ROTATE_TICKS) as usize;
+        let details = details[step % details.len()].clone();
+        let state = states[step % states.len()].clone();
+
+        // buttons (max 2)
+        let mut buttons = Vec::new();
+        if let Some(r) = &self.active_room {
+            buttons.push(("view room".to_string(), format!("https://tryhackme.com/room/{}", r.name)));
+        }
+        if !self.discord_link.trim().is_empty() {
+            buttons.push(("get pivt".to_string(), self.discord_link.trim().to_string()));
+        }
+
         d.update(Presence {
             details,
             state,
             start_epoch: self.box_epoch,
             large_image: "pivt".to_string(),
             large_text: "pivt — ctf toolkit".to_string(),
+            buttons,
         });
     }
 
@@ -668,6 +721,7 @@ impl App {
             flow_bg: self.flow_bg,
             discord_rpc: self.discord_rpc,
             discord_app_id: self.discord_app_id.clone(),
+            discord_link: self.discord_link.clone(),
         };
         let _ = save_config(&cfg);
         // keep the shell kit's target file + room .target in sync with RHOST
@@ -1212,6 +1266,34 @@ impl App {
             }
         }
     }
+    /// Copy a loot field to the clipboard. field: 0=user, 1=pass, 2=hash.
+    pub fn loot_copy_field(&mut self, field: usize) {
+        let picked = self.loot.get(self.loot_idx).map(|c| match field {
+            0 => ("user", c.user.clone()),
+            2 => ("hash", c.hash.clone()),
+            _ => ("pass", c.pass.clone()),
+        });
+        if let Some((label, val)) = picked {
+            if val.is_empty() {
+                self.set_status(format!("no {label} on this entry"));
+                return;
+            }
+            match clipboard::copy(&val) {
+                Ok(_) => self.set_status(format!("✓ copied {label}: {val}")),
+                Err(e) => self.set_status(format!("✗ copy failed: {e}")),
+            }
+        }
+    }
+    /// Yank the password (or hash if there's no password).
+    pub fn loot_copy_pass(&mut self) {
+        let use_hash = self
+            .loot
+            .get(self.loot_idx)
+            .map(|c| c.pass.is_empty() && !c.hash.is_empty())
+            .unwrap_or(false);
+        self.loot_copy_field(if use_hash { 2 } else { 1 });
+    }
+
     pub fn loot_delete(&mut self) {
         if self.loot_idx < self.loot.len() {
             self.loot.remove(self.loot_idx);
