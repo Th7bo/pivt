@@ -58,6 +58,12 @@ pub struct Config {
     /// Background style: true = flowing ASCII field, false = starfield.
     #[serde(default)]
     pub flow_bg: bool,
+    /// Enable Discord Rich Presence (opt-in).
+    #[serde(default)]
+    pub discord_rpc: bool,
+    /// Discord application (client) id for Rich Presence; empty = disabled.
+    #[serde(default)]
+    pub discord_app_id: String,
     #[serde(default)]
     pub vars: BTreeMap<String, String>,
 }

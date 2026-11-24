@@ -1397,7 +1397,7 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_help(f: &mut Frame) {
-    let area = centered(f.area(), 62, 30);
+    let area = centered(f.area(), 62, 32);
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1429,6 +1429,7 @@ fn draw_help(f: &mut Frame) {
         row("e", "edit variables (split: this cmd / all)"),
         row("f", "pin ★ favorite (shows ★/⏱ categories)"),
         row("b", "toggle background: starfield ↔ flow field"),
+        row("D", "toggle Discord Rich Presence"),
         row("a / d", "add / delete a command"),
         row("/", "fuzzy search across all commands"),
         row("q / esc", "quit"),

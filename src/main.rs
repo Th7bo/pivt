@@ -1,6 +1,7 @@
 mod anim;
 mod app;
 mod clipboard;
+mod discord;
 mod gtfobins;
 mod loot;
 mod model;
@@ -466,6 +467,7 @@ fn normal_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Char('L') => app.open_loot(),
         KeyCode::Char('f') => app.toggle_favorite(),
         KeyCode::Char('b') => app.toggle_bg(),
+        KeyCode::Char('D') => app.toggle_discord(),
         KeyCode::Char('g') => app.open_gtfo(),
         KeyCode::Char('P') => app.parse_scan(),
         KeyCode::Char('F') => app.flag_open(),
