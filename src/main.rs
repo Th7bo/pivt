@@ -167,14 +167,33 @@ fn snapshot(what: &str) {
     term.draw(|f| ui::draw(f, &app)).unwrap();
     let buf = term.backend().buffer();
     let area = buf.area;
+    // PIVT_SNAP_ANSI=1 emits truecolor fg/bg + bold per cell (for README screenshots).
+    let ansi = std::env::var_os("PIVT_SNAP_ANSI").is_some();
+    let rgb = |c: ratatui::style::Color, default: (u8, u8, u8)| match c {
+        ratatui::style::Color::Rgb(r, g, b) => (r, g, b),
+        _ => default,
+    };
     for y in 0..area.height {
         let mut line = String::new();
         for x in 0..area.width {
             if let Some(cell) = buf.cell((x, y)) {
+                if ansi {
+                    let (fr, fg, fb) = rgb(cell.fg, (0xc9, 0xd1, 0xd9));
+                    let (br, bg, bb) = rgb(cell.bg, (0x0d, 0x11, 0x17));
+                    let bold = cell.modifier.contains(ratatui::style::Modifier::BOLD) as u8;
+                    line.push_str(&format!(
+                        "\x1b[0;{}38;2;{fr};{fg};{fb};48;2;{br};{bg};{bb}m",
+                        if bold == 1 { "1;" } else { "" }
+                    ));
+                }
                 line.push_str(cell.symbol());
             }
         }
-        println!("{}", line.trim_end());
+        if ansi {
+            println!("{line}\x1b[0m");
+        } else {
+            println!("{}", line.trim_end());
+        }
     }
 }
 

@@ -4,6 +4,40 @@
 
 A sleek TUI cheatsheet for CTF / pentest commands (Rust + ratatui).
 
+118 bundled commands across 20 categories, filled from your target variables
+and copied with one key. Run them live in a real PTY, parse scans into
+suggestions, track loot and flags per room, and export a writeup.
+
+![normal view](assets/screenshots/normal.png)
+
+| | |
+|---|---|
+| ![splash](assets/screenshots/splash.png) | ![run pane](assets/screenshots/run.png) |
+| ![gtfobins](assets/screenshots/gtfo.png) | |
+
+## Install
+
+```sh
+cargo install --git https://github.com/Th7bo/pivt
+```
+
+Or grab a prebuilt Linux x86_64 binary from
+[Releases](https://github.com/Th7bo/pivt/releases).
+
+Runtime requirements (Linux):
+
+- **`wl-copy`** (wl-clipboard) for copying to the clipboard (Wayland).
+- **`ip`** (iproute2) to auto-detect `LHOST` from tun/tap/wg/tailscale/wlan.
+- A truecolor terminal and a font with good Unicode coverage
+  (e.g. JetBrains Mono / any Nerd Font).
+
+Run `pivt`, press `?` for keybinds. Add your own commands in
+`~/.config/pivt/commands.toml` (same `[[command]]` schema as the bundled
+`src/default_commands.toml`).
+
+Screenshots are rendered headlessly:
+`PIVT_SNAP_ANSI=1 pivt snap normal > s.txt && python3 scripts/ansi2png.py s.txt s.png`.
+
 ## Discord Rich Presence
 
 pivt can advertise what you're working on to Discord via Rich Presence:
@@ -56,3 +90,7 @@ python3 scripts/presence_icons.py src/theme.rs assets/presence
 ```
 
 The presence refreshes about every 5 seconds while pivt runs.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

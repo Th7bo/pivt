@@ -3,6 +3,11 @@ name = "pivt"
 version = "0.1.0"
 edition = "2021"
 description = "pivt — a sleek TUI cheatsheet for CTF / pentest commands"
+license = "MIT"
+repository = "https://github.com/Th7bo/pivt"
+readme = "README.md"
+keywords = ["ctf", "pentest", "tui", "cheatsheet", "ratatui"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "pivt"
