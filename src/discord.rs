@@ -30,6 +30,9 @@ pub struct Presence {
     pub start_epoch: Option<i64>,
     pub large_image: String,
     pub large_text: String,
+    /// Small corner badge: an asset key or an https URL (Discord proxies it).
+    pub small_image: String,
+    pub small_text: String,
     /// Up to two (label, url) buttons. Discord hides your own buttons from
     /// you; other people see them on your profile.
     pub buttons: Vec<(String, String)>,
@@ -164,6 +167,12 @@ fn apply(client: &mut DiscordIpcClient, p: &Presence) -> bool {
         let mut assets = activity::Assets::new().large_image(p.large_image.as_str());
         if !p.large_text.is_empty() {
             assets = assets.large_text(p.large_text.as_str());
+        }
+        if !p.small_image.is_empty() {
+            assets = assets.small_image(p.small_image.as_str());
+            if !p.small_text.is_empty() {
+                assets = assets.small_text(p.small_text.as_str());
+            }
         }
         act = act.assets(assets);
     }

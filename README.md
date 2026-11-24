@@ -1,5 +1,7 @@
 # pivt
 
+![pivt](assets/banner.png)
+
 A sleek TUI cheatsheet for CTF / pentest commands (Rust + ratatui).
 
 ## Discord Rich Presence
@@ -43,6 +45,14 @@ creds, current category (top), and target status, open ports (bottom).
 Buttons (Discord hides your own buttons from you; others see them):
 
 - **view room** links `https://tryhackme.com/room/<active room>` when a room is active.
-- **get pivt** appears when `discord_link = "https://…"` is set in the config.
+- **get pivt** links the repo (override with `discord_link = "https://…"`).
+
+The small corner badge shows the current category's glyph in its TUI colour,
+loaded from `assets/presence/<category>.png` in this repo (no Discord upload
+needed). Regenerate after adding a category to `theme.rs`:
+
+```sh
+python3 scripts/presence_icons.py src/theme.rs assets/presence
+```
 
 The presence refreshes about every 5 seconds while pivt runs.

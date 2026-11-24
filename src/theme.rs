@@ -25,6 +25,11 @@ pub const SYN_STR: Color = Color::Rgb(0xe5, 0xc0, 0x7b); // 'quoted'
 pub const SYN_NUM: Color = Color::Rgb(0xf0, 0xb4, 0x57); // 123 / ip / :port
 pub const SYN_OP: Color = Color::Rgb(0x6d, 0x7a, 0x8a); // | ; && > <
 
+/// True when `name` has its own entry in [`category_style`] (not the fallback).
+pub fn has_category_style(name: &str) -> bool {
+    category_style(name) != category_style("\u{0}")
+}
+
 /// Per-category glyph + accent color. Unknown categories fall back to a diamond.
 pub fn category_style(name: &str) -> (char, Color) {
     match name {

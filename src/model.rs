@@ -45,6 +45,8 @@ struct CommandFileOut<'a> {
 }
 
 /// The official pivt Discord application (name "pivt", art asset `pivt`).
+/// Project home; default target of the "get pivt" presence button.
+pub const REPO_URL: &str = "https://github.com/Th7bo/pivt";
 pub const DEFAULT_DISCORD_APP_ID: &str = "1574922609542303924";
 
 /// Config = the persisted variable values.
@@ -68,7 +70,7 @@ pub struct Config {
     /// bundled pivt app ([`DEFAULT_DISCORD_APP_ID`]).
     #[serde(default)]
     pub discord_app_id: String,
-    /// Optional URL for a "get pivt" button on the Discord presence.
+    /// URL for the "get pivt" presence button; empty = [`REPO_URL`].
     #[serde(default)]
     pub discord_link: String,
     #[serde(default)]

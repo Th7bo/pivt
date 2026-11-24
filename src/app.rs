@@ -3,6 +3,8 @@ use crate::discord::{DiscordRpc, Presence};
 /// Ticks (~50ms each) between rotating the presence text lines. ~15s keeps us
 /// well inside Discord's 5-updates-per-20s rate limit.
 const RPC_ROTATE_TICKS: u64 = 300;
+/// Where the per-category presence badges live (`assets/presence/<cat>.png`).
+const PRESENCE_IMG_BASE: &str = "https://raw.githubusercontent.com/Th7bo/pivt/main/assets/presence";
 use crate::loot::{self, Cred};
 use crate::model::*;
 use crate::ping::{Ping, Pinger};
@@ -446,9 +448,18 @@ impl App {
         if let Some(r) = &self.active_room {
             buttons.push(("view room".to_string(), format!("https://tryhackme.com/room/{}", r.name)));
         }
-        if !self.discord_link.trim().is_empty() {
-            buttons.push(("get pivt".to_string(), self.discord_link.trim().to_string()));
-        }
+        let link = self.discord_link.trim();
+        let link = if link.is_empty() { crate::model::REPO_URL } else { link };
+        buttons.push(("get pivt".to_string(), link.to_string()));
+
+        // small badge = current category's glyph, served from the repo
+        let (small_image, small_text) = match self.current_category() {
+            Some(cat) => {
+                let file = if crate::theme::has_category_style(cat) { cat } else { "default" };
+                (format!("{PRESENCE_IMG_BASE}/{file}.png"), cat.to_string())
+            }
+            None => (String::new(), String::new()),
+        };
 
         d.update(Presence {
             details,
@@ -456,6 +467,8 @@ impl App {
             start_epoch: self.box_epoch,
             large_image: "pivt".to_string(),
             large_text: "pivt — ctf toolkit".to_string(),
+            small_image,
+            small_text,
             buttons,
         });
     }
