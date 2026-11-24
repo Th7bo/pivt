@@ -166,6 +166,7 @@ pub struct App {
     pub runs: Vec<RunJob>,
     pub run_tab: usize,
     pub show_run: bool,
+    pub run_fullscreen: bool,
     pub interacting: bool, // keystrokes go to the focused job's PTY
 
     // loot / creds
@@ -300,6 +301,7 @@ impl App {
             runs: Vec::new(),
             run_tab: 0,
             show_run: false,
+            run_fullscreen: false,
             interacting: false,
             loot,
             loot_idx: 0,
@@ -345,7 +347,7 @@ impl App {
     /// until the user presses a key.
     pub fn on_tick(&mut self) {
         self.tick += 1;
-        let (rows, cols) = crate::runner::pane_size();
+        let (rows, cols) = crate::runner::pane_size(self.run_fullscreen);
         for r in &mut self.runs {
             r.poll();
             r.resize(rows, cols);
@@ -954,7 +956,7 @@ impl App {
         let steps = cmd.run_steps();
         let multi = steps.len() > 1;
         let first_new = self.runs.len();
-        let (rows, cols) = crate::runner::pane_size();
+        let (rows, cols) = crate::runner::pane_size(self.run_fullscreen);
         let cwd = self.active_room.as_ref().map(|r| r.path.clone());
         let mut spawned = 0;
         for (i, step) in steps.iter().enumerate() {
@@ -994,6 +996,12 @@ impl App {
 
     pub fn active_run(&self) -> Option<&RunJob> {
         self.runs.get(self.run_tab)
+    }
+    pub fn toggle_run_fullscreen(&mut self) {
+        self.run_fullscreen = !self.run_fullscreen;
+        if self.run_fullscreen {
+            self.focus = Focus::Run;
+        }
     }
     pub fn run_tab_next(&mut self) {
         if !self.runs.is_empty() {

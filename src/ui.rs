@@ -196,6 +196,11 @@ fn bare_block(border: Color) -> Block<'static> {
 }
 
 fn draw_body(f: &mut Frame, app: &App, area: Rect) {
+    // zoomed: the run pane takes the whole body
+    if app.show_run && !app.runs.is_empty() && app.run_fullscreen {
+        draw_run(f, app, area);
+        return;
+    }
     // reserve the lower part for the run pane when it's visible
     let (top, run) = if app.show_run && !app.runs.is_empty() {
         let rows = Layout::default()
@@ -724,8 +729,8 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             &[("⌨", "typing → program"), ("F12", "detach")]
         } else {
             &[
-                ("i", "interact"), ("↑↓", "scroll"), ("←→", "tab"),
-                ("K", "kill"), ("d", "close"), ("g", "tail"), ("⇥", "panes"),
+                ("i", "interact"), ("z", if app.run_fullscreen { "unzoom" } else { "zoom" }),
+                ("↑↓", "scroll"), ("←→", "tab"), ("K", "kill"), ("d", "close"), ("g", "tail"),
             ]
         };
         render_footer(f, app, area, pairs);
@@ -1421,7 +1426,6 @@ fn draw_help(f: &mut Frame) {
         Line::from(Span::styled(" navigation", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD))),
         row("tab / ←→", "switch pane (categories ↔ commands)"),
         row("↑↓ / jk", "move within a pane"),
-        Line::from(""),
         Line::from(Span::styled(" actions", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD))),
         row("enter", "fill from vars + copy (and log it)"),
         row("x", "run it live in the run pane (↓ tabs)"),
@@ -1433,12 +1437,11 @@ fn draw_help(f: &mut Frame) {
         row("a / d", "add / delete a command"),
         row("/", "fuzzy search across all commands"),
         row("q / esc", "quit"),
-        Line::from(""),
         Line::from(Span::styled(" run pane (⇥ into it)", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD))),
         row("i / ⏎", "interact (type into it) · F12 detach"),
         row("↑↓", "scroll · ←→ switch tab · g tail"),
+        row("z", "zoom the run tab fullscreen (bigger PTY)"),
         row("K / d", "kill job / close tab"),
-        Line::from(""),
         Line::from(Span::styled(" ctf rooms + writeup", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD))),
         row("c", "rooms: pick/activate, n=new, o=notes"),
         row("L", "loot: capture creds → ⏎ load USER/PASS/HASH"),
@@ -1446,7 +1449,6 @@ fn draw_help(f: &mut Frame) {
         row("w", "add a writeup note to the log"),
         row("F / E", "capture flag → notes · export writeup.md"),
         row("o", "open active room's notes in $EDITOR"),
-        Line::from(""),
         Line::from(Span::styled(
             "  copies auto-log to the room (or ~/.config/pivt/writeups).",
             Style::default().fg(DIM),

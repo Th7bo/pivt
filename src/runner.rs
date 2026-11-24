@@ -250,12 +250,12 @@ fn strip_ansi(s: &str) -> String {
 
 /// Approximate the run pane's inner (rows, cols) from the current terminal size,
 /// matching the layout in ui.rs (bottom ~42% of the body, minus borders).
-pub fn pane_size() -> (u16, u16) {
+pub fn pane_size(fullscreen: bool) -> (u16, u16) {
     let (cols, rows) = crossterm::terminal::size().unwrap_or((100, 32));
-    // body = total - header(3) - footer(1); run pane = 42% of body, minus
-    // panel border (2) and the tab-bar row (1).
+    // body = total - header(3) - footer(1); run pane = 42% of body (or all of
+    // it when zoomed), minus panel border (2) and the tab-bar row (1).
     let body = rows.saturating_sub(4);
-    let run_h = (body as u32 * 42 / 100) as u16;
+    let run_h = if fullscreen { body } else { (body as u32 * 42 / 100) as u16 };
     let inner_rows = run_h.saturating_sub(3).max(4);
     let inner_cols = cols.saturating_sub(2).max(20);
     (inner_rows, inner_cols)

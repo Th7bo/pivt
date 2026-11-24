@@ -72,24 +72,27 @@ fn snapshot(what: &str) {
             app.note_open();
             app.note_buf = "found creds in /var/backups — svc:Summer2024".into();
         }
-        "run" => {
+        "run" | "runzoom" => {
             app.mode = Mode::Normal;
             app.logging = false;
+            let zoom = what == "runzoom";
+            let (r, c) = if zoom { (26, 108) } else { (18, 100) };
             if let Ok(j) = runner::RunJob::spawn(
                 "nmap quick",
                 "printf 'Starting Nmap 7.95\\nNmap scan report for 10.10.11.42\\nPORT    STATE SERVICE\\n22/tcp  open  ssh\\n80/tcp  open  http\\n445/tcp open  microsoft-ds\\n'; sleep 0.05; echo 'Nmap done: 1 IP address scanned'",
-                18, 100, None,
+                r, c, None,
             ) {
                 app.runs.push(j);
             }
-            if let Ok(j) = runner::RunJob::spawn("ffuf dirs", "sleep 5", 18, 100, None) {
+            if let Ok(j) = runner::RunJob::spawn("ffuf dirs", "sleep 5", r, c, None) {
                 app.runs.push(j);
             }
             app.show_run = true;
             app.focus = Focus::Run;
+            app.run_fullscreen = zoom;
             std::thread::sleep(std::time::Duration::from_millis(250));
-            for r in &mut app.runs {
-                r.poll();
+            for rj in &mut app.runs {
+                rj.poll();
             }
         }
         "loot" => {
@@ -505,8 +508,15 @@ fn run_focus_keys(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Char('K') => app.run_kill_active(),
         KeyCode::Char('d') => app.run_close_active(),
         KeyCode::Char('g') => app.run_tail(),
+        KeyCode::Char('z') => app.toggle_run_fullscreen(),
         KeyCode::Char('i') | KeyCode::Enter => app.begin_interact(),
-        KeyCode::Esc => app.focus = Focus::Commands,
+        KeyCode::Esc => {
+            if app.run_fullscreen {
+                app.run_fullscreen = false; // unzoom back to the split view
+            } else {
+                app.focus = Focus::Commands;
+            }
+        }
         _ => return false,
     }
     true
