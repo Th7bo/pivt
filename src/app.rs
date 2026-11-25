@@ -1631,10 +1631,9 @@ impl App {
         }
     }
     pub fn add_loot_open(&mut self) {
+        // Start empty: USER/PASS vars are global and carry stale creds across
+        // boxes, so pre-filling from them saved the wrong account.
         self.loot_form = LootForm::default();
-        // pre-fill from current vars for convenience
-        self.loot_form.user = self.vars.get("USER").cloned().unwrap_or_default();
-        self.loot_form.pass = self.vars.get("PASS").cloned().unwrap_or_default();
         self.mode = Mode::AddLoot;
     }
     pub fn add_loot_next(&mut self) {
