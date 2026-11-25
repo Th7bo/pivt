@@ -34,8 +34,8 @@ impl Cred {
             if !s.is_empty() {
                 s.push(' ');
             }
-            let h = if self.hash.len() > 16 {
-                format!("{}…", &self.hash[..16])
+            let h = if self.hash.chars().count() > 16 {
+                format!("{}…", self.hash.chars().take(16).collect::<String>())
             } else {
                 self.hash.clone()
             };
@@ -86,5 +86,18 @@ pub fn save(path: &PathBuf, creds: &[Cred]) {
     let f = LootFile { creds: creds.to_vec() };
     if let Ok(txt) = toml::to_string_pretty(&f) {
         let _ = std::fs::write(path, txt);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn label_truncates_multibyte_hash() {
+        let c = Cred { user: "ü".into(), hash: "é".repeat(20), ..Default::default() };
+        assert_eq!(c.label(), format!("ü #{}…", "é".repeat(16)));
+        let short = Cred { hash: "✦✦".into(), ..Default::default() };
+        assert_eq!(short.label(), "#✦✦");
     }
 }
