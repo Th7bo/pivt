@@ -271,7 +271,7 @@ impl Htb {
 
 /// Fetch profile (+ tasks) for `id` into the shared state.
 fn refresh(api: &Api, state: &Arc<Mutex<HtbState>>, id: &str) -> Result<(), String> {
-    let v = api.get(&format!("v4/machine/profile/{id}"))?;
+    let v = api.get(&format!("v4/machine/profile/{}", path_segment(id)))?;
     let m = parse_machine(&v["info"]).ok_or("unexpected profile response")?;
     let mut tasks = Vec::new();
     if m.guided {
@@ -290,6 +290,21 @@ fn refresh(api: &Api, state: &Arc<Mutex<HtbState>>, id: &str) -> Result<(), Stri
         s.tasks = tasks;
     }
     Ok(())
+}
+
+/// Percent-encode `s` for use as one URL path segment. Only letters, digits
+/// and `-_~` pass through, so `/`, `?`, `#`, spaces and `..` can't change
+/// which endpoint is hit.
+fn path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 fn synthetic(title: &str, kind: TaskKind, done: bool) -> Task {
@@ -393,6 +408,14 @@ fn read(r: Result<ureq::Response, ureq::Error>) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn machine_name_is_percent_encoded() {
+        assert_eq!(path_segment("Lame"), "Lame");
+        assert_eq!(path_segment("42"), "42");
+        assert_eq!(path_segment("../v4/user/info?x=1#y"), "%2E%2E%2Fv4%2Fuser%2Finfo%3Fx%3D1%23y");
+        assert_eq!(path_segment("a b✦"), "a%20b%E2%9C%A6");
+    }
 
     #[test]
     fn parses_profile_and_tasks() {
