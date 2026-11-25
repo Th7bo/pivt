@@ -468,6 +468,7 @@ impl App {
         };
         app.refresh_categories();
         app.clamp();
+        app.pinger.set_ports(&app.port_list());
         if lhost_changed && background {
             app.persist_config();
         }
@@ -1822,6 +1823,7 @@ impl App {
             return;
         }
         self.vars.insert("PORTS".into(), ports.join(","));
+        self.pinger.set_ports(&self.port_list());
         self.scan_services = services.clone();
         // seed URL if a web port is open and URL unset
         let rhost = self.vars.get("RHOST").cloned().unwrap_or_default();

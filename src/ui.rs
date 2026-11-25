@@ -184,8 +184,9 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         },
     ]);
     // box timer (+ rtt) on the right of the target border
+    let via = ping.tcp_port.map(|p| format!(" tcp/{p}")).unwrap_or_default();
     let timer = match (app.box_elapsed(), ping.rtt_ms) {
-        (Some(t), Some(r)) => format!(" ⏱ {t} · {r}ms "),
+        (Some(t), Some(r)) => format!(" ⏱ {t} · {r}ms{via} "),
         (Some(t), None) => format!(" ⏱ {t} "),
         _ => String::new(),
     };
