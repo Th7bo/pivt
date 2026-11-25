@@ -327,6 +327,13 @@ pub struct App {
     session_out: Vec<(u64, usize, bool)>,
     session_full_tick: u64,
 
+    /// Executables on PATH (+ ~/.local/bin), scanned at startup and on `m`.
+    pub tools: crate::tools::ToolIndex,
+    /// Command key → programs it needs that aren't installed.
+    tool_missing: std::collections::HashMap<String, Vec<String>>,
+    /// Hide commands whose tools are missing (`m`, persisted).
+    pub hide_missing: bool,
+
     matcher: SkimMatcherV2,
 }
 
@@ -349,6 +356,9 @@ impl App {
         a.logging = false;
         a.paths.target_file = None; // never touch the real shell target file
         a.persist = false;
+        // deterministic: every tool "installed" unless a test says otherwise
+        a.tools = crate::tools::ToolIndex::everything();
+        a.refresh_missing();
         a
     }
 
@@ -520,8 +530,12 @@ impl App {
             session_sig: String::new(),
             session_out: Vec::new(),
             session_full_tick: 0,
+            tools: crate::tools::ToolIndex::scan(),
+            tool_missing: Default::default(),
+            hide_missing: cfg.hide_missing,
             matcher: SkimMatcherV2::default(),
         };
+        app.refresh_missing();
         app.refresh_categories();
         app.clamp();
         app.pinger.set_ports(&app.port_list());
@@ -716,8 +730,17 @@ impl App {
         self.refresh_categories();
     }
 
-    /// Indices into self.commands currently visible (after search / category filter).
+    /// Indices into self.commands currently visible (after search / category
+    /// filter, minus commands with missing tools when those are hidden).
     pub fn visible(&self) -> Vec<usize> {
+        let mut v = self.visible_all();
+        if self.hide_missing {
+            v.retain(|&i| self.missing_tools(&self.commands[i]).is_empty());
+        }
+        v
+    }
+
+    fn visible_all(&self) -> Vec<usize> {
         if !self.search.is_empty() {
             let mut scored: Vec<(i64, usize)> = self
                 .commands
@@ -923,6 +946,57 @@ impl App {
         }
     }
 
+    // ── missing tools ──
+    /// Recompute which commands need tools that aren't installed.
+    pub fn refresh_missing(&mut self) {
+        self.tool_missing = self
+            .commands
+            .iter()
+            .filter_map(|c| {
+                let m = self.tools.missing(&crate::tools::required(c));
+                (!m.is_empty()).then(|| (cmd_key(c), m))
+            })
+            .collect();
+    }
+
+    /// Programs `c` needs that aren't on PATH (never any for target-side).
+    pub fn missing_tools(&self, c: &Command) -> &[String] {
+        self.tool_missing.get(&cmd_key(c)).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Missing programs of an already-filled command line (re-runs).
+    fn missing_tools_line(&self, line: &str) -> Vec<String> {
+        self.tools.missing(&crate::tools::binaries(line))
+    }
+
+    /// "`cewl` not found on PATH — install it first (kali: apt install cewl)"
+    pub fn missing_tool_msg(missing: &[String]) -> String {
+        let list = missing.iter().map(|b| format!("`{b}`")).collect::<Vec<_>>().join(", ");
+        let hint = missing
+            .iter()
+            .find_map(|b| crate::tools::install_hint(b))
+            .map(|h| format!(" ({h})"))
+            .unwrap_or_default();
+        format!("✗ {list} not found on PATH — install it first{hint}")
+    }
+
+    /// `m`: rescan PATH and hide / show commands whose tools are missing.
+    pub fn toggle_hide_missing(&mut self) {
+        self.hide_missing = !self.hide_missing;
+        self.rescan_tools();
+        self.persist_config();
+        let n = self.tool_missing.len();
+        let what = if self.hide_missing { "hidden" } else { "shown (✗)" };
+        self.set_status(format!("rescanned PATH ({} programs) · {n} command{} with missing tools {what} · m toggles", self.tools.count(), if n == 1 { "" } else { "s" }));
+    }
+
+    /// Re-read PATH (tools installed while pivt runs).
+    pub fn rescan_tools(&mut self) {
+        self.tools = crate::tools::ToolIndex::scan();
+        self.refresh_missing();
+        self.clamp();
+    }
+
     // ── actions ──
     pub fn copy_selected(&mut self) {
         let Some(filled) = self.filled_selected() else { return };
@@ -989,6 +1063,7 @@ impl App {
             favorites: self.favorites.clone(),
             recent: self.recent.clone(),
             flow_bg: self.flow_bg,
+            hide_missing: self.hide_missing,
             theme: self.theme_cfg.clone(),
             discord_rpc: self.discord_rpc,
             discord_app_id: self.discord_app_id.clone(),
@@ -1119,6 +1194,7 @@ impl App {
             steps: vec![],
             side: Default::default(),
             raw_pty: false,
+            requires: vec![],
             user: true,
         };
         // overriding an existing command keeps where it runs
@@ -1136,6 +1212,7 @@ impl App {
         } else {
             self.commands.push(cmd);
         }
+        self.refresh_missing();
         // seed placeholders into vars
         for ph in new_phs {
             self.vars.entry(ph).or_default();
@@ -1158,6 +1235,7 @@ impl App {
             if self.commands[idx].user {
                 let name = self.commands[idx].name.clone();
                 self.commands.remove(idx);
+                self.refresh_missing();
                 self.refresh_categories();
                 let _ = save_user_commands(&self.commands);
                 self.clamp();
@@ -1353,6 +1431,11 @@ impl App {
         let missing = self.missing_vars(&cmd);
         if !missing.is_empty() {
             self.set_status(format!("⚠ set {} before running (e)", missing.join(", ")));
+            return;
+        }
+        let tools = self.missing_tools(&cmd).to_vec();
+        if !tools.is_empty() {
+            self.set_status(Self::missing_tool_msg(&tools));
             return;
         }
         let first_new = self.runs.len();
@@ -1603,6 +1686,11 @@ impl App {
                     skipped.push(format!("{} (needs {})", cmd.name, missing.join(",")));
                     continue;
                 }
+                let tools = self.missing_tools(&cmd);
+                if !tools.is_empty() {
+                    skipped.push(format!("{} ({} not installed)", cmd.name, tools.join(",")));
+                    continue;
+                }
                 if r.sequential {
                     // all sequential steps share one queue, so stacking
                     // recipes (A) never runs two of them at once
@@ -1689,6 +1777,11 @@ impl App {
                 self.set_status(format!("⚠ skipped {} (needs {})", cmd.name, missing.join(",")));
                 continue;
             }
+            let tools = self.missing_tools(&cmd);
+            if !tools.is_empty() {
+                self.set_status(format!("⚠ skipped {} ({} not installed)", cmd.name, tools.join(",")));
+                continue;
+            }
             if self.spawn_sequence_step(&cmd) > 0 {
                 let left = self.sequence.queue.len();
                 self.set_status(format!("▶ next in sequence: {} · {left} left", cmd.name));
@@ -1771,6 +1864,12 @@ impl App {
             self.set_status(format!("⛔ {TARGET_SIDE_MSG}"));
             return;
         }
+        let tools = self.missing_tools_line(&cmd);
+        if !tools.is_empty() {
+            self.set_status(Self::missing_tool_msg(&tools));
+            return;
+        }
+        let Some(job) = self.runs.get(self.run_tab) else { return };
         // the room dir may be gone since the session was saved
         let cwd = job.cwd.clone().filter(|d| d.is_dir());
         if let Some(dir) = cwd.clone().or_else(|| std::env::current_dir().ok()) {
@@ -2733,6 +2832,41 @@ mod tests {
     }
 
     #[test]
+    fn missing_tools_block_x_but_never_target_side() {
+        let mut app = App::for_tests();
+        for (k, v) in [("LHOST", "10.10.14.2"), ("LPORT", "4444"), ("URL", "http://x"), ("RHOST", "10.10.10.10"), ("FILE", "x")] {
+            app.vars.insert(k.into(), v.into());
+        }
+        app.tools = crate::tools::ToolIndex::from_names(&["nmap"]);
+        app.refresh_missing();
+        // local command with its tool missing: marked + refused with a hint
+        let cewl = app.command_by_key("web/cewl wordlist").unwrap();
+        assert_eq!(app.missing_tools(&app.commands[cewl]), ["cewl"]);
+        select(&mut app, "web/cewl wordlist");
+        app.run_selected();
+        assert!(app.runs.is_empty());
+        assert!(app.status.contains("`cewl` not found on PATH — install it first"), "{:?}", app.status);
+        assert!(app.status.contains("apt install cewl"), "{:?}", app.status);
+        // installed tool: not marked
+        let quick = app.command_by_key("nmap/Quick top-ports").unwrap();
+        assert!(app.missing_tools(&app.commands[quick]).is_empty());
+        // target-side commands run on the victim: never marked missing
+        for c in app.commands.iter().filter(|c| c.is_target()) {
+            assert!(app.missing_tools(c).is_empty(), "{} marked missing", c.name);
+        }
+        // hiding drops cewl from the list but keeps nmap and target-side ones
+        app.hide_missing = true;
+        app.cat_idx = app.categories.iter().position(|c| c == "web").unwrap();
+        assert!(!app.visible().contains(&cewl));
+        app.cat_idx = app.categories.iter().position(|c| c == "nmap").unwrap();
+        assert!(app.visible().contains(&quick));
+        // an explicit requires overrides the guess
+        let mut c = app.commands[quick].clone();
+        c.requires = vec!["impacket-secretsdump".into()];
+        assert_eq!(app.tools.missing(&crate::tools::required(&c)), ["impacket-secretsdump"]);
+    }
+
+    #[test]
     fn recipes_skip_target_side_steps() {
         let mut app = App::for_tests();
         let r = crate::recipe::Recipe {
@@ -2761,6 +2895,7 @@ mod tests {
                 steps: vec![],
                 side: Side::Local,
                 raw_pty: false,
+                requires: vec![],
                 user: false,
             });
         }

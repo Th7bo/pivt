@@ -464,6 +464,7 @@ fn draw_commands(f: &mut Frame, app: &App, area: Rect) {
             let c = &app.commands[ci];
             let sel = row == app.cmd_idx;
             let (glyph, color) = category_style(&c.category);
+            let missing = !app.missing_tools(c).is_empty();
             let mark = if sel {
                 Span::styled("▎", Style::default().fg(crate::anim::pulse(app.tick)))
             } else {
@@ -474,10 +475,18 @@ fn draw_commands(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled(
                     c.name.clone(),
                     Style::default()
-                        .fg(if sel { theme().fg } else { theme().subtle })
+                        .fg(match (sel, missing) {
+                            (true, _) => theme().fg,
+                            (false, true) => theme().dim,
+                            (false, false) => theme().subtle,
+                        })
                         .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
                 ),
             ];
+            if missing {
+                // tool not on PATH: `x` refuses it
+                spans.push(Span::styled("  ✗", Style::default().fg(theme().warn)));
+            }
             if app.is_favorite_cmd(c) {
                 spans.push(Span::styled("  ★", Style::default().fg(theme().gold)));
             }
@@ -617,11 +626,13 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let filled = crate::model::fill_template(&cmd.template, &app.vars);
+    let missing = app.missing_tools(cmd);
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // name + badge
+            Constraint::Length(if missing.is_empty() { 0 } else { 1 }), // missing tool
             Constraint::Length(2), // description
             Constraint::Min(4),    // command box
             Constraint::Length(1), // tags
@@ -651,13 +662,26 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
     }
     f.render_widget(Paragraph::new(Line::from(title_spans)), rows[0]);
 
+    // "✗ wpscan not installed — gem install wpscan"
+    if !missing.is_empty() {
+        let mut spans = vec![
+            Span::styled("✗ ", Style::default().fg(theme().warn).add_modifier(Modifier::BOLD)),
+            Span::styled(missing.join(", "), Style::default().fg(theme().warn).add_modifier(Modifier::BOLD)),
+            Span::styled(" not installed", Style::default().fg(theme().warn)),
+        ];
+        if let Some(h) = missing.iter().find_map(|b| crate::tools::install_hint(b)) {
+            spans.push(Span::styled(format!(" — {h}"), Style::default().fg(theme().muted)));
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), rows[1]);
+    }
+
     // description
     let desc = if cmd.description.is_empty() {
         Span::styled("—", Style::default().fg(theme().dim))
     } else {
         Span::styled(cmd.description.clone(), Style::default().fg(theme().muted))
     };
-    f.render_widget(Paragraph::new(desc).wrap(Wrap { trim: true }), rows[1]);
+    f.render_widget(Paragraph::new(desc).wrap(Wrap { trim: true }), rows[2]);
 
     // command box with a copy hint on the right
     let cmd_block = Block::default()
@@ -676,7 +700,7 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(Line::from(command_spans(&filled)))
             .block(cmd_block)
             .wrap(Wrap { trim: false }),
-        rows[2],
+        rows[3],
     );
 
     // tags
@@ -687,7 +711,7 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
     if tag_spans.is_empty() {
         tag_spans.push(Span::styled("", Style::default()));
     }
-    f.render_widget(Paragraph::new(Line::from(tag_spans)), rows[3]);
+    f.render_widget(Paragraph::new(Line::from(tag_spans)), rows[4]);
 
     // vars label — hint changes when the pane is focused
     let hint = if focused {
@@ -701,7 +725,7 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("variables", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD)),
             Span::styled(hint, Style::default().fg(theme().dim)),
         ])),
-        rows[4],
+        rows[5],
     );
 
     // vars used — selectable/editable inline when the preview is focused
@@ -756,7 +780,7 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
             value_span,
         ]));
     }
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), rows[5]);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), rows[6]);
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
@@ -1910,7 +1934,8 @@ fn draw_help(f: &mut Frame, app: &App) {
         row("↑↓ / jk", "move within a pane"),
         Line::from(Span::styled(" actions", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD))),
         row("enter", "fill from vars + copy (and log it)"),
-        row("x", "run it live (◎ target-side: copy only)"),
+        row("x", "run it live (◎ target: copy only · ✗ tool missing)"),
+        row("m", "hide / show ✗ commands whose tool isn't installed"),
         row("P", "parse scan output → PORTS + ✸ suggested"),
         row("R", "recipes: run command bundles · A = all matched"),
         row("H", "Hack The Box: machine, guided tasks + hints, flags"),
@@ -1925,8 +1950,7 @@ fn draw_help(f: &mut Frame, app: &App) {
             if app.discord_rpc { "on" } else { "off" },
             app.discord_privacy.as_str()
         )),
-        row("a / d", "add / delete a command"),
-        row("/", "fuzzy search across all commands"),
+        row("/ · a / d", "fuzzy search all · add / delete a command"),
         row("q / esc", "quit"),
         Line::from(Span::styled(" run pane (⇥ into it)", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD))),
         row("i / ⏎", "interact (type into it) · F12 detach"),

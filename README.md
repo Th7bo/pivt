@@ -40,6 +40,34 @@ Screenshots are rendered headlessly:
 `snap` never reads or writes the saved session. Add `--theme <name>` (or set
 `PIVT_THEME=<name>`) to render any theme, e.g. `pivt snap normal --theme nord`.
 
+## Missing tools
+
+pivt checks `PATH` (plus `~/.local/bin`, where distrobox exports its
+wrappers) once at startup and marks commands whose program isn't installed
+with a dim name and `✗`. The preview says which one and how to get it, e.g.
+`✗ wpscan not installed — gem install wpscan · kali: apt install wpscan`
+(Fedora `dnf` packages, the Kali `apt` name for a kali distrobox, or a
+`pipx` / `cargo` / `gem` install). `x` and recipes refuse such a command with
+a status message instead of starting a job that dies with exit 127.
+
+`m` rescans `PATH` (so a tool you just installed counts) and toggles hiding
+those commands (saved as `hide_missing`). Target-side (`◎`) commands run on
+the victim and are never marked.
+
+The program is guessed from the template: the first word of each pipeline /
+`;` / `&&` segment, skipping `sudo`, `env`, `VAR=val` prefixes, redirections
+and shell builtins, looking inside `sh -c '…'` and expanding `$HOME` / `~`.
+Anything built at run time (`$VAR`, `$(…)`, `<PLACEHOLDER>`, relative paths)
+isn't guessed. Override the guess per command:
+
+```toml
+[[command]]
+category = "ad"
+name = "secretsdump (venv)"
+template = "python3 ~/tools/impacket/secretsdump.py <DOMAIN>/<USER>:<PASS>@<RHOST>"
+requires = ["impacket-secretsdump"]
+```
+
 ## Themes
 
 `t` cycles themes and `T` opens a picker with a live preview (`↑↓` preview,

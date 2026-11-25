@@ -14,6 +14,7 @@ mod room;
 mod runner;
 mod session;
 mod theme;
+mod tools;
 mod ui;
 mod writeup;
 
@@ -836,6 +837,7 @@ fn normal_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Char('H') => app.open_htb(),
         KeyCode::Char('F') => app.flag_open(),
         KeyCode::Char('E') => app.export_open(),
+        KeyCode::Char('m') => app.toggle_hide_missing(),
         _ => {}
     }
 }

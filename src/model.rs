@@ -25,6 +25,10 @@ pub struct Command {
     /// bytes instead of killing/stopping the local listener.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub raw_pty: bool,
+    /// Programs this command needs, overriding the guess from the template's
+    /// first word (`requires = ["impacket-secretsdump"]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
     /// true if it came from the user's commands.toml (editable/removable)
     #[serde(skip)]
     pub user: bool,
@@ -111,6 +115,9 @@ pub struct Config {
     /// Background style: true = flowing ASCII field, false = starfield.
     #[serde(default)]
     pub flow_bg: bool,
+    /// Hide commands whose tools aren't installed (`m`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide_missing: bool,
     /// Colour theme by name (a preset or a file in ~/.config/pivt/themes/).
     /// A string so an unknown name falls back to the default instead of
     /// failing the parse; empty = default.
