@@ -1990,7 +1990,7 @@ impl App {
             self.set_status(format!("✗ can't write hash file: {e}"));
             return;
         }
-        let q = |p: &std::path::Path| format!("'{}'", p.display().to_string().replace('\'', "'\\''"));
+        let q = |p: &std::path::Path| shell_quote(&p.display().to_string());
         let (hf, of, wl) = (q(&hash_file), q(&out_file), q(std::path::Path::new(&wordlist)));
         // --show after the attack also covers hashes already in the potfile.
         let (cmd, how) = match tool {

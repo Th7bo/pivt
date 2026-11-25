@@ -134,14 +134,14 @@ tags = ["smb", "enum"]
 category = "smb"
 name = "smbclient connect"
 description = "Connect to a share (fill share after //)"
-template = "smbclient //<RHOST>/SHARE -U '<USER>%<PASS>'"
+template = "smbclient //<RHOST>/SHARE -U <USER>%<PASS>"
 tags = ["smb", "access"]
 
 [[command]]
 category = "smb"
 name = "crackmapexec shares"
 description = "Auth + list shares, spray-friendly"
-template = "crackmapexec smb <RHOST> -u '<USER>' -p '<PASS>' --shares"
+template = "crackmapexec smb <RHOST> -u <USER> -p <PASS> --shares"
 tags = ["smb", "cme", "ad"]
 
 [[command]]
@@ -319,14 +319,14 @@ tags = ["ad", "dump", "impacket"]
 category = "ad"
 name = "evil-winrm"
 description = "WinRM shell with creds or hash"
-template = "evil-winrm -i <RHOST> -u <USER> -p '<PASS>'"
+template = "evil-winrm -i <RHOST> -u <USER> -p <PASS>"
 tags = ["ad", "winrm", "shell"]
 
 [[command]]
 category = "ad"
 name = "bloodhound-python"
 description = "Collect AD graph data remotely"
-template = "bloodhound-python -d <DOMAIN> -u <USER> -p '<PASS>' -ns <RHOST> -c all"
+template = "bloodhound-python -d <DOMAIN> -u <USER> -p <PASS> -ns <RHOST> -c all"
 tags = ["ad", "bloodhound"]
 
 [[command]]
@@ -477,28 +477,28 @@ tags = ["shell", "revshell", "busybox"]
 category = "encode"
 name = "base64 encode"
 description = "base64 a string (no wrap)"
-template = "echo -n '<DATA>' | base64 -w0; echo"
+template = "printf %s <DATA> | base64 -w0; echo"
 tags = ["encode", "base64"]
 
 [[command]]
 category = "encode"
 name = "base64 decode"
 description = "decode base64"
-template = "echo -n '<DATA>' | base64 -d; echo"
+template = "printf %s <DATA> | base64 -d; echo"
 tags = ["encode", "base64"]
 
 [[command]]
 category = "encode"
 name = "url encode"
 description = "percent-encode a string"
-template = "python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(\"<DATA>\",safe=\"\"))'"
+template = "python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=\"\"))' <DATA>"
 tags = ["encode", "url"]
 
 [[command]]
 category = "encode"
 name = "url decode"
 description = "decode a percent-encoded string"
-template = "python3 -c 'import sys,urllib.parse;print(urllib.parse.unquote(\"<DATA>\"))'"
+template = "python3 -c 'import sys,urllib.parse;print(urllib.parse.unquote(sys.argv[1]))' <DATA>"
 tags = ["encode", "url"]
 
 [[command]]
@@ -595,7 +595,7 @@ tags = ["rpc", "enum"]
 category = "rpc"
 name = "enum domain users"
 description = "list users over RPC"
-template = "rpcclient -U '<USER>%<PASS>' <RHOST> -c 'enumdomusers'"
+template = "rpcclient -U <USER>%<PASS> <RHOST> -c 'enumdomusers'"
 tags = ["rpc", "ad", "users"]
 
 # ── db clients ──
@@ -610,14 +610,14 @@ tags = ["db", "mssql"]
 category = "db"
 name = "mysql"
 description = "connect to MySQL/MariaDB"
-template = "mysql -h <RHOST> -u <USER> -p'<PASS>'"
+template = "mysql -h <RHOST> -u <USER> -p<PASS>"
 tags = ["db", "mysql"]
 
 [[command]]
 category = "db"
 name = "psql"
 description = "connect to PostgreSQL"
-template = "PGPASSWORD='<PASS>' psql -h <RHOST> -U <USER>"
+template = "PGPASSWORD=<PASS> psql -h <RHOST> -U <USER>"
 tags = ["db", "postgres"]
 
 [[command]]
@@ -653,7 +653,7 @@ tags = ["ad", "pth", "hash"]
 category = "ad"
 name = "nxc smb spray"
 description = "netexec: validate creds across SMB"
-template = "nxc smb <RHOST> -u <USER> -p '<PASS>' --shares"
+template = "nxc smb <RHOST> -u <USER> -p <PASS> --shares"
 tags = ["ad", "netexec", "spray"]
 
 # ── web attack ──
@@ -661,7 +661,7 @@ tags = ["ad", "netexec", "spray"]
 category = "web"
 name = "sqlmap"
 description = "automated SQLi on a request/URL"
-template = "sqlmap -u '<URL>' --batch --dbs"
+template = "sqlmap -u <URL> --batch --dbs"
 tags = ["web", "sqli"]
 
 [[command]]
@@ -826,7 +826,7 @@ tags = ["windows", "flags"]
 category = "crack"
 name = "hashid"
 description = "identify a hash type"
-template = "hashid '<HASH>'"
+template = "hashid <HASH>"
 tags = ["crack", "identify"]
 
 [[command]]

