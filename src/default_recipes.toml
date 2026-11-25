@@ -4,13 +4,17 @@
 #   ports       recipe is "matched" when any of these is in PORTS (set by P)
 #   services    …or when the last parsed scan saw one of these nmap services
 #   steps       "category/command name" of bundled or user commands
+#   sequential  true = run the steps one after another (the next starts when
+#               the previous job exits) instead of all at once. Use it for
+#               scans: parallel nmaps over a VPN drop packets and miss ports.
 #
 # A recipe with no ports/services always matches. Override or add your own in
 # ~/.config/pivt/recipes.toml (same schema; same name replaces a bundled one).
 
 [[recipe]]
 name = "first look"
-description = "Fast top-ports scan plus the full TCP + top UDP sweeps in the background."
+description = "Top-ports scan, then the full TCP sweep, then top UDP, one at a time."
+sequential = true
 steps = ["nmap/Quick top-ports", "nmap/Full TCP all-ports", "nmap/UDP top-100"]
 
 [[recipe]]

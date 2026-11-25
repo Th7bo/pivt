@@ -22,6 +22,10 @@ pub struct Recipe {
     pub services: Vec<String>,
     /// Command keys, `category/name`.
     pub steps: Vec<String>,
+    /// Run the steps one after another (each starts when the previous job
+    /// exits) instead of all at once. For scans that would fight over a VPN.
+    #[serde(default)]
+    pub sequential: bool,
 }
 
 #[derive(Deserialize)]
@@ -88,6 +92,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn sequential_flag_parses() {
+        let all = parse(BUNDLED);
+        let first = all.iter().find(|r| r.name == "first look").unwrap();
+        assert!(first.sequential, "nmap-heavy recipe should be sequential");
+        // every recipe with more than one nmap step is sequential
+        for r in &all {
+            if r.steps.iter().filter(|s| s.starts_with("nmap/")).count() > 1 {
+                assert!(r.sequential, "{}", r.name);
+            }
+        }
+        assert!(!all.iter().find(|r| r.name == "smb enum").unwrap().sequential);
     }
 
     #[test]

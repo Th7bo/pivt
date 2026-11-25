@@ -159,6 +159,22 @@ enum CrackTool {
     John(&'static str),
 }
 
+/// Steps of sequential recipes, run one job at a time.
+#[derive(Default)]
+pub struct Sequence {
+    /// Jobs of the step that is running now (a multi-step command has several).
+    pub waiting: Vec<u64>,
+    /// Key of the command those jobs belong to.
+    pub current: Option<String>,
+    pub queue: std::collections::VecDeque<Command>,
+}
+
+impl Sequence {
+    fn has(&self, key: &str) -> bool {
+        self.current.as_deref() == Some(key) || self.queue.iter().any(|c| cmd_key(c) == key)
+    }
+}
+
 /// Whether `bin` is an executable on $PATH.
 fn on_path(bin: &str) -> bool {
     std::env::var_os("PATH")
@@ -223,6 +239,8 @@ pub struct App {
     pub loot_idx: usize,
     /// hashcat runs started from the loot view, resolved when their tab exits.
     pub cracks: Vec<PendingCrack>,
+    /// Sequential recipe steps still to run.
+    pub sequence: Sequence,
     // recipes (R)
     pub recipes: Vec<crate::recipe::Recipe>,
     pub recipe_idx: usize,
@@ -430,6 +448,7 @@ impl App {
             loot,
             loot_idx: 0,
             cracks: Vec::new(),
+            sequence: Sequence::default(),
             recipes: crate::recipe::load_all(),
             recipe_idx: 0,
             scan_services: Vec::new(),
@@ -498,6 +517,7 @@ impl App {
             r.resize(rows, cols);
         }
         self.poll_cracks();
+        self.poll_sequence();
         self.poll_htb();
         // track RHOST changes: re-point the pinger and (re)start the box timer
         let rhost = self.vars.get("RHOST").cloned().unwrap_or_default();
@@ -1457,12 +1477,13 @@ impl App {
     fn run_recipes(&mut self, recipes: &[crate::recipe::Recipe]) {
         let first_new = self.runs.len();
         let mut started = 0;
+        let mut queued = 0;
         let mut skipped: Vec<String> = Vec::new();
         let mut seen: Vec<String> = Vec::new();
         for r in recipes {
             for step in &r.steps {
-                if seen.contains(step) {
-                    continue; // same command in two recipes: run once
+                if seen.contains(step) || self.sequence.has(step) {
+                    continue; // same command in two recipes / already queued: run once
                 }
                 seen.push(step.clone());
                 let Some(cmd) = self.command_for_key(step).cloned() else {
@@ -1478,10 +1499,27 @@ impl App {
                     skipped.push(format!("{} (needs {})", cmd.name, missing.join(",")));
                     continue;
                 }
-                started += self.spawn_cmd(&cmd);
+                if r.sequential {
+                    // all sequential steps share one queue, so stacking
+                    // recipes (A) never runs two of them at once
+                    if self.sequence.current.is_some() {
+                        self.sequence.queue.push_back(cmd);
+                        queued += 1;
+                    } else {
+                        let n = self.spawn_sequence_step(&cmd);
+                        started += n;
+                    }
+                } else {
+                    started += self.spawn_cmd(&cmd);
+                }
             }
         }
         let names = recipes.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", ");
+        if started == 0 && queued > 0 {
+            self.mode = Mode::Normal;
+            self.set_status(format!("⏳ {names}: {queued} step{} queued after the running scan", if queued == 1 { "" } else { "s" }));
+            return;
+        }
         if started == 0 {
             self.set_status(format!("✗ nothing ran for {names}: {}", skipped.join("; ")));
             return;
@@ -1493,10 +1531,66 @@ impl App {
         self.mode = Mode::Normal;
         self.show_runs_from(first_new);
         let mut msg = format!("▶ {names}: {started} tab{}", if started == 1 { "" } else { "s" });
+        let waiting = self.sequence.queue.len();
+        if waiting > 0 {
+            msg.push_str(&format!(" · {waiting} queued, one at a time (K stops the sequence)"));
+        }
         if !skipped.is_empty() {
             msg.push_str(&format!(" · skipped {}", skipped.join("; ")));
         }
         self.set_status(msg);
+    }
+
+    /// Spawn `cmd` as the running step of the sequence. Returns tabs started.
+    fn spawn_sequence_step(&mut self, cmd: &Command) -> usize {
+        let before = self.runs.len();
+        let n = self.spawn_cmd(cmd);
+        if n > 0 {
+            self.sequence.waiting = self.runs[before..].iter().map(|j| j.id).collect();
+            self.sequence.current = Some(cmd_key(cmd));
+        }
+        n
+    }
+
+    /// Start the next sequential step once every job of the current one has
+    /// exited. A step that was killed (K) or closed while running stops the
+    /// whole sequence.
+    fn poll_sequence(&mut self) {
+        if self.sequence.current.is_none() {
+            return;
+        }
+        let mut stopped = false;
+        for id in &self.sequence.waiting {
+            match self.runs.iter().find(|j| j.id == *id) {
+                Some(j) if j.is_running() => return,
+                Some(j) if j.exit == Some(-1) => stopped = true,
+                Some(_) => {}
+                None => stopped = true,
+            }
+        }
+        self.sequence.waiting.clear();
+        self.sequence.current = None;
+        if stopped {
+            let n = self.sequence.queue.len();
+            self.sequence.queue.clear();
+            if n > 0 {
+                self.set_status(format!("⏹ sequence stopped — {n} queued step{} dropped", if n == 1 { "" } else { "s" }));
+            }
+            return;
+        }
+        while let Some(cmd) = self.sequence.queue.pop_front() {
+            // vars may have changed since it was queued
+            let missing = self.missing_vars(&cmd);
+            if !missing.is_empty() {
+                self.set_status(format!("⚠ skipped {} (needs {})", cmd.name, missing.join(",")));
+                continue;
+            }
+            if self.spawn_sequence_step(&cmd) > 0 {
+                let left = self.sequence.queue.len();
+                self.set_status(format!("▶ next in sequence: {} · {left} left", cmd.name));
+                return;
+            }
+        }
     }
 
     pub fn active_run(&self) -> Option<&RunJob> {
@@ -2487,10 +2581,101 @@ mod tests {
             ports: vec![],
             services: vec![],
             steps: vec!["misc/sudo -l".into(), "shells/busybox nc".into()],
+            sequential: false,
         };
         app.run_recipes(&[r]);
         assert!(app.runs.is_empty());
         assert!(app.status.contains("target-side"), "status {:?}", app.status);
+    }
+
+    /// An app with local test commands `t/a`, `t/b`, `t/c` (`sleep`s).
+    fn seq_app() -> App {
+        let mut app = App::for_tests();
+        for (n, t) in [("a", "sleep 0.3"), ("b", "sleep 0.3"), ("c", "true")] {
+            app.commands.push(Command {
+                category: "t".into(),
+                name: n.into(),
+                description: String::new(),
+                template: t.into(),
+                tags: vec![],
+                steps: vec![],
+                side: Side::Local,
+                raw_pty: false,
+                user: false,
+            });
+        }
+        app
+    }
+
+    fn recipe(name: &str, steps: &[&str], sequential: bool) -> crate::recipe::Recipe {
+        crate::recipe::Recipe {
+            name: name.into(),
+            description: String::new(),
+            ports: vec![],
+            services: vec![],
+            steps: steps.iter().map(|s| s.to_string()).collect(),
+            sequential,
+        }
+    }
+
+    /// Poll jobs + the sequence until `n` tabs exist and all have finished.
+    fn settle(app: &mut App, n: usize) {
+        for _ in 0..200 {
+            for r in &mut app.runs {
+                r.poll();
+            }
+            app.poll_sequence();
+            if app.runs.len() == n && app.runs.iter().all(|j| !j.is_running()) && app.sequence.current.is_none() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("didn't settle at {n} tabs: {} tabs, status {:?}", app.runs.len(), app.status);
+    }
+
+    #[test]
+    fn sequential_recipe_runs_one_step_at_a_time() {
+        let mut app = seq_app();
+        app.run_recipes(&[recipe("seq", &["t/a", "t/b", "t/c"], true)]);
+        assert_eq!(app.runs.len(), 1, "only the first step starts");
+        assert_eq!(app.sequence.queue.len(), 2);
+        assert!(app.status.contains("2 queued"), "{}", app.status);
+        // the second step waits for the first to exit
+        app.poll_sequence();
+        assert_eq!(app.runs.len(), 1);
+        // stacking (A) the same + another sequential recipe joins the queue,
+        // without duplicates and without starting anything in parallel
+        app.run_recipes(&[recipe("more", &["t/b", "t/c", "t/a"], true)]);
+        assert_eq!(app.runs.len(), 1);
+        assert_eq!(app.sequence.queue.len(), 2, "already queued/running steps aren't added twice");
+        settle(&mut app, 3);
+        let titles: Vec<_> = app.runs.iter().map(|j| j.title.as_str()).collect();
+        assert_eq!(titles, ["a", "b", "c"]);
+        // each started after the previous one ended: exits are all clean
+        assert!(app.runs.iter().all(|j| j.exit == Some(0)));
+    }
+
+    #[test]
+    fn parallel_recipe_starts_everything() {
+        let mut app = seq_app();
+        app.run_recipes(&[recipe("par", &["t/a", "t/b", "t/c"], false)]);
+        assert_eq!(app.runs.len(), 3);
+        assert!(app.sequence.current.is_none() && app.sequence.queue.is_empty());
+        for j in &mut app.runs {
+            j.kill();
+        }
+    }
+
+    #[test]
+    fn killing_a_sequential_step_stops_the_rest() {
+        let mut app = seq_app();
+        app.run_recipes(&[recipe("seq", &["t/a", "t/b", "t/c"], true)]);
+        app.run_tab = 0;
+        app.run_kill_active();
+        app.poll_sequence();
+        assert_eq!(app.runs.len(), 1, "nothing after a killed step");
+        assert!(app.sequence.queue.is_empty() && app.sequence.current.is_none());
+        assert!(app.status.contains("sequence stopped"), "{}", app.status);
     }
 
     #[test]

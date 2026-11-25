@@ -1385,7 +1385,13 @@ fn draw_recipes(f: &mut Frame, app: &App) {
         ),
     ]));
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("steps", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD))));
+    lines.push(Line::from(vec![
+        Span::styled("steps", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            if r.sequential { "  one at a time" } else { "  all at once" },
+            Style::default().fg(DIM),
+        ),
+    ]));
     for step in &r.steps {
         match app.command_for_key(step) {
             Some(c) => {

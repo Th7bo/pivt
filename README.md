@@ -91,8 +91,14 @@ printf '%s' 'TOKEN' > ~/.config/pivt/htb_token && chmod 600 ~/.config/pivt/htb_t
 
 Bundles of commands that run together, one run tab each. After a scan, press
 `P` to parse it; recipes whose ports/services match the box float to the top
-(●). `⏎` runs the selected recipe, `A` runs every matched one at once. Steps
+(●). `⏎` runs the selected recipe, `A` runs every matched one. Steps
 with unset variables are skipped and listed in the status line.
+
+A recipe with `sequential = true` runs its steps one at a time: the next
+starts when the previous job exits, and `K` on the running step drops the
+rest. Parallel nmaps over a VPN drop packets and miss ports, so the bundled
+"first look" scan recipe is sequential. All sequential steps share one queue,
+so stacking recipes with `A` never runs two of them at once.
 
 Bundled: first look, web recon, smb enum, ad recon, dns, snmp, ad with creds.
 Add or override your own in `~/.config/pivt/recipes.toml`:
@@ -104,6 +110,7 @@ description = "anon login check + banner"
 ports = [21]
 services = ["ftp"]
 steps = ["misc/my ftp check"]   # "category/command name"
+sequential = false              # true = one step at a time
 ```
 
 ## Cracking loot (`L` → `c`)
