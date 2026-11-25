@@ -97,7 +97,7 @@ Main view:
 | `notes` | `o` | open room notes in `$EDITOR` |
 | `loot` | `L` | loot / creds |
 | `favorite` | `f` | pin / unpin favorite |
-| `bg` | `b` | background effect |
+| `bg` | `b` | cycle background: stars / flow / off ([look](#look--motion)) |
 | `theme` / `theme_picker` | `t` / `T` | next theme / theme picker |
 | `discord` / `discord_privacy` | `D` / `M` | Discord presence on/off / privacy |
 | `gtfobins` | `g` | GTFOBins lookup |
@@ -221,6 +221,93 @@ web = "#bd93f9"
 
 Categories: `nmap web smb shells upgrade transfer ad crack pivot misc encode
 dns snmp rpc db tunnel forensics pwn win msf favorites recent suggested`.
+
+## Layout
+
+Pane sizes, which panes and header items show, and a compact mode for small
+terminals, all under `[layout]` in `config.toml`. List only what you change;
+`pivt prefs` prints every option with its current value (`*` = changed) and
+any problems. Bad values never break the config: an unknown key, a wrong
+type or an unknown choice is ignored with a warning in the status line at
+startup, and numbers out of range are clamped.
+
+```toml
+[layout]
+categories_width = 16    # columns
+commands_width = 50      # % of the width; the preview takes the rest
+show_preview = false
+compact = true
+```
+
+| key | default | values | |
+|---|---|---|---|
+| `categories_width` | `20` | 10–40 columns | categories pane width |
+| `commands_width` | `42` | 20–80 % | commands pane width; preview gets the rest |
+| `run_height` | `42` | 15–85 % | run pane height when split (`z` zoom is unchanged) |
+| `show_categories` | `true` | bool | categories pane (hidden: browse with `/` search) |
+| `show_preview` | `true` | bool | preview pane (the commands pane is always shown) |
+| `show_logo` | `true` | bool | header: logo + active room |
+| `show_search` | `true` | bool | header: search box (`/` still works) |
+| `show_target` | `true` | bool | header: target box |
+| `show_ping` | `true` | bool | target box: reachability dot |
+| `show_timer` | `true` | bool | target box: box timer + rtt |
+| `show_scope` | `true` | bool | target box: `⊙ scope` badge + `✓`/`⚠` mark |
+| `show_lhost` | `true` | bool | target box: `⇡ LHOST:LPORT` |
+| `show_hints` | `true` | bool | key hints in the footer (main view; popups keep theirs, the status line stays) |
+| `compact` | `false` | bool | no pane borders, one-line header |
+
+Hidden panes give their space to the others and drop out of the `⇥` cycle.
+On small terminals the layout degrades instead of breaking: the preview
+always keeps ~30 columns while it can, a pane that can't fit (categories
+below ~22 columns, preview below 14) is dropped, the run pane keeps 6 rows of
+panes above it, and the header goes away when there are fewer than ~7 rows.
+
+## Look & motion
+
+Background, splash, animations, borders and glyphs live under `[look]`, with
+the same lenient rules as `[layout]`.
+
+```toml
+[look]
+background = "flow"
+flow_charset = "blocks"
+animations = false
+border = "plain"
+marker = "arrow"
+
+[look.categories]        # per category: glyph and/or colour
+web = { glyph = "W", color = "#7aa2f7" }
+loot = { color = "accent2" }   # your own categories too
+nmap = "N"                     # shorthand: glyph only
+```
+
+| key | default | values | |
+|---|---|---|---|
+| `background` | `"stars"` | `stars` `flow` `off` | effect behind the UI; `b` cycles it and saves it here (the old `flow_bg = true` still means flow when this isn't set) |
+| `bg_density` | `5` | 1–10 | more stars / more flow cells |
+| `bg_slowdown` | `1` | 1–10 | tick divisor: 2 = half speed |
+| `flow_charset` | `"classic"` | `classic` ` .,:;-=+*x#%@` · `blocks` `░▒▓█` · `dots` `·•●` · `ascii` (a 68-char ramp) · `braille` `⠁⠃⠇⡇⣇⣧⣷⣿`, or your own string (2–96 single-width chars, faint → dense) | flow field ramp |
+| `star_glyphs` | `"classic"` | `classic` · `dots` `·∙•●` · `ascii` `.+*` · `sparkle` `·✧✦`, or your own (1–12 chars, dim → bright) | starfield glyphs |
+| `ripple` | `true` | bool | mouse ripple in the flow field (off also releases the mouse unless the run pane is open) |
+| `splash` | `true` | bool | startup splash (`PIVT_NO_SPLASH=1` / `--no-splash` still skip it) |
+| `splash_hold` | `true` | bool | wait for a key; `false` = continue after `splash_seconds` |
+| `splash_seconds` | `3` | 1–30 | auto-continue delay |
+| `animations` | `true` | bool | pulse, twinkle, drift, shooting stars, flag burst ring, typewriter splash |
+| `border` | `"rounded"` | `rounded` `plain` `double` `thick` `none` | border style (`none`: panes lose their borders, popups draw plain lines) |
+| `marker` | `"bar"` | `bar` `▎` · `arrow` `▸` · `dot` `•` · `chevron` `›`, or any one single-width character | selected-row marker |
+
+`[look.categories]` overrides the theme's category colour and the built-in
+glyph, by category name. A colour is `#rrggbb` / `#rgb` or a theme role name
+(`accent`, `accent2`, `ok`, `warn`, `gold`, `orange`, …, see
+[custom themes](#custom-themes)), so role colours follow theme switches.
+
+With `animations = false` everything stands still (steady accent, frozen
+background, static splash) and pivt stops repainting at 20 fps: it redraws on
+input, on new job output, when the ping state changes, and once a second for
+the box timer. Handy on slow SSH links or if motion is distracting.
+
+`pivt snap <view> --size 80x24` (or `PIVT_SNAP_SIZE=80x24`) renders any of
+this headlessly at a given size.
 
 ## Rooms and shell integration
 
