@@ -51,6 +51,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::Gtfo => draw_gtfo(f, app),
         Mode::Recipes => draw_recipes(f, app),
         Mode::Htb => draw_htb(f, app),
+        Mode::Export => draw_export(f, app),
         _ => {}
     }
 
@@ -786,6 +787,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Mode::NewRoom => &[("⇥", "field"), ("^s", "create"), ("esc", "cancel")],
         Mode::Loot => &[("↑↓", "move"), ("⏎", "use vars"), ("y", "copy pass"), ("Y/U", "hash/user"), ("c", "crack"), ("a", "add"), ("d", "del"), ("esc", "close")],
         Mode::AddLoot => &[("⇥", "field"), ("^s", "save"), ("esc", "cancel")],
+        Mode::Export => &[("n/⏎", "redacted"), ("y", "include secrets"), ("esc", "cancel")],
         Mode::Flag => &[("⇥", "user/root"), ("type", "value"), ("⏎", "save+copy"), ("esc", "cancel")],
         Mode::Gtfo => &[("type", "filter binary"), ("↑↓", "move"), ("⏎", "copy"), ("esc", "close")],
         Mode::Recipes => &[("↑↓", "move"), ("⏎", "run recipe"), ("A", "run all matched"), ("esc", "close")],
@@ -993,6 +995,53 @@ fn draw_gtfo(f: &mut Frame, app: &App) {
         rows[1],
         &mut state,
     );
+}
+
+fn draw_export(f: &mut Frame, app: &App) {
+    let active = app.active_htb_machine();
+    let area = centered(f.area(), 66, if active.is_some() { 10 } else { 7 });
+    f.render_widget(Clear, area);
+    let color = if active.is_some() { WARN } else { ACCENT };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(color))
+        .title(Span::styled(" export writeup ", Style::default().fg(color).add_modifier(Modifier::BOLD)))
+        .style(Style::default().bg(PANEL));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let mut lines = Vec::new();
+    if let Some(m) = &active {
+        lines.push(Line::from(Span::styled(
+            format!("⚠ active machine — {m} isn't retired."),
+            Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            "Sharing solutions breaks HTB rules: keep the export local.",
+            Style::default().fg(FG),
+        )));
+        lines.push(Line::from(Span::styled(
+            "The file gets -PRIVATE in its name and a PRIVATE header.",
+            Style::default().fg(DIM),
+        )));
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        "HTB/THM rules: no flags or walkthroughs for active content.",
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("By default flags + credential values become {}.", crate::writeup::REDACTED),
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("include flags & credentials? ", Style::default().fg(FG).add_modifier(Modifier::BOLD)),
+        Span::styled("y", Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
+        Span::styled(" / ", Style::default().fg(DIM)),
+        Span::styled("N", Style::default().fg(OK).add_modifier(Modifier::BOLD)),
+    ]));
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
 fn draw_flag(f: &mut Frame, app: &App) {
@@ -1830,7 +1879,7 @@ fn draw_help(f: &mut Frame, app: &App) {
         row("L", "loot: creds · ⏎ load vars · c crack hash"),
         row("g", "GTFOBins privesc lookup (offline)"),
         row("w", "add a writeup note to the log"),
-        row("F / E", "capture flag → notes · export writeup.md"),
+        row("F / E", "capture flag → notes · export writeup (redacted)"),
         row("o", "open active room's notes in $EDITOR"),
         Line::from(Span::styled(
             "  copies auto-log to the room · RHOST → sync_target_file (if on)",

@@ -165,6 +165,15 @@ fn snapshot(what: &str) {
             app.flag_buf = "a1b2c3d4e5f6...".into();
         }
         "vars" => app.mode = Mode::Vars,
+        "export" | "export-active" => {
+            if what == "export-active" {
+                app.htb = htb::Htb::with_state(htb::HtbState {
+                    machine: Some(htb::Machine { name: "Lame".into(), ..Default::default() }),
+                    ..Default::default()
+                });
+            }
+            app.export_open();
+        }
         "add" => {
             app.add_open();
             app.add.template = "ffuf -u <URL>/FUZZ -w <WORDLIST>".into();
@@ -449,6 +458,12 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Gtfo => gtfo_keys(app, key),
         Mode::Recipes => recipe_keys(app, key),
         Mode::Htb => htb_keys(app, key),
+        Mode::Export => match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => app.export_writeup(true),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Enter => app.export_writeup(false),
+            KeyCode::Esc | KeyCode::Char('q') => app.mode = Mode::Normal,
+            _ => {}
+        },
     }
 }
 
@@ -499,7 +514,7 @@ fn handle_paste(app: &mut App, text: &str) {
                 b.push_str(&line);
             }
         }
-        Mode::Splash | Mode::Help | Mode::Rooms | Mode::Loot | Mode::Recipes => {}
+        Mode::Splash | Mode::Help | Mode::Rooms | Mode::Loot | Mode::Recipes | Mode::Export => {}
     }
 }
 
@@ -786,7 +801,7 @@ fn normal_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Char('R') => app.open_recipes(),
         KeyCode::Char('H') => app.open_htb(),
         KeyCode::Char('F') => app.flag_open(),
-        KeyCode::Char('E') => app.export_writeup(),
+        KeyCode::Char('E') => app.export_open(),
         _ => {}
     }
 }

@@ -42,6 +42,8 @@ pub enum Mode {
     Gtfo,
     Recipes,
     Htb,
+    /// "include flags + credentials?" prompt before a writeup export.
+    Export,
 }
 
 /// Text being typed inside the HTB panel.
@@ -2396,12 +2398,37 @@ impl App {
     }
 
     // ── writeup export ──
-    pub fn export_writeup(&mut self) {
+    /// `E`: ask whether to include secrets (default no) before exporting.
+    pub fn export_open(&mut self) {
+        self.mode = Mode::Export;
+    }
+
+    /// Name of a not-yet-retired machine loaded in the HTB panel.
+    pub fn active_htb_machine(&self) -> Option<String> {
+        self.htb.snapshot().machine.filter(|m| !m.retired).map(|m| m.name)
+    }
+
+    pub fn export_writeup(&mut self, include_secrets: bool) {
+        self.mode = Mode::Normal;
         let target = self.vars.get("RHOST").cloned().unwrap_or_default();
         let domain = self.vars.get("DOMAIN").cloned().unwrap_or_default();
         let lhost = self.vars.get("LHOST").cloned().unwrap_or_default();
-        match writeup::export(self.active_room.as_ref(), &target, &domain, &lhost, &self.loot) {
-            Ok(p) => self.set_status(format!("✓ writeup exported → {}", short_path(&p))),
+        let opts = writeup::ExportOpts {
+            include_secrets,
+            active_box: self.active_htb_machine(),
+            secrets: self
+                .vars
+                .iter()
+                .filter(|(k, v)| writeup::is_secret_var(k) && !v.is_empty())
+                .map(|(_, v)| v.clone())
+                .collect(),
+        };
+        match writeup::export(self.active_room.as_ref(), &target, &domain, &lhost, &self.loot, &opts) {
+            Ok(p) => {
+                let what = if include_secrets { "with flags + creds" } else { "secrets redacted" };
+                let private = if opts.active_box.is_some() { " · PRIVATE (active box)" } else { "" };
+                self.set_status(format!("✓ writeup exported ({what}{private}) → {}", short_path(&p)))
+            }
             Err(e) => self.set_status(format!("✗ export failed: {e}")),
         }
     }

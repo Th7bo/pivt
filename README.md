@@ -103,6 +103,25 @@ Read them with `less -R`. The command log links each run to its output, and
 `E` lists them all in the exported writeup. Logs and other files holding
 credentials are created `0600`. `PIVT_NO_LOG=1` turns logging off.
 
+## Writeup export (`E`)
+
+`E` builds `writeup.md` in the room (no room: `~/.config/pivt/writeups/`)
+from the target info, the loot table, `notes.md`, the command log and links to
+the job logs. HTB forbids sharing solutions to active machines and THM's rules
+forbid publishing flags or walkthroughs for active content, so pivt asks first:
+
+- `n` / `⏎` (default): flags and credential values become `‹redacted›`, with
+  the structure kept. That covers loot passwords and hashes, `PASS`/`HASH`/
+  `*TOKEN*`/`*KEY*`/`*SECRET*` variable values wherever they appear (filled
+  commands included), the values in the notes' Flags table, pivt's flag /
+  task-answer / cracked log lines, `HTB{…}`/`THM{…}`/`flag{…}` tokens and bare
+  32-hex strings. Linked job logs are raw files and are not redacted.
+- `y`: include everything.
+
+If the HTB panel has a machine loaded that isn't retired, the prompt warns
+that the box is active, and the file is written as `writeup-PRIVATE.md` with a
+"PRIVATE — active box" header.
+
 ## Hack The Box (`H`)
 
 Pulls the box straight from HTB Labs: name, OS, difficulty, IP, synopsis and
