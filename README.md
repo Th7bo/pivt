@@ -26,7 +26,7 @@ Or grab a prebuilt Linux x86_64 binary from
 
 Runtime requirements (Linux):
 
-- **`wl-copy`** (wl-clipboard) for copying to the clipboard (Wayland).
+- A clipboard tool: **`wl-copy`** (Wayland), or **`xclip`** / **`xsel`** (X11). Without one (e.g. over SSH) pivt falls back to OSC 52, which most terminals honor.
 - **`ip`** (iproute2) to auto-detect `LHOST` from tun/tap/wg/tailscale/wlan.
 - A truecolor terminal and a font with good Unicode coverage
   (e.g. JetBrains Mono / any Nerd Font).

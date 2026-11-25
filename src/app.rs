@@ -801,8 +801,8 @@ impl App {
             None => return,
         };
         match clipboard::copy(&filled) {
-            Ok(_) => {
-                let mut msg = String::from("✓ copied");
+            Ok(how) => {
+                let mut msg = format!("✓ copied ({})", how.label());
                 let missing = self.missing_vars_for_selected();
                 if !missing.is_empty() {
                     msg.push_str(&format!(" (⚠ unset: {})", missing.join(", ")));
@@ -1913,7 +1913,7 @@ impl App {
                 return;
             }
             match clipboard::copy(&val) {
-                Ok(_) => self.set_status(format!("✓ copied {label}: {val}")),
+                Ok(how) => self.set_status(format!("✓ copied {label} ({}): {val}", how.label())),
                 Err(e) => self.set_status(format!("✗ copy failed: {e}")),
             }
         }
@@ -2135,11 +2135,14 @@ impl App {
         let which = if self.flag_is_root { "root" } else { "user" };
         let target = self.vars.get("RHOST").cloned().unwrap_or_default();
         writeup::set_flag(self.active_room.as_ref(), &target, which, &value);
-        let _ = clipboard::copy(&value);
+        let copied = match clipboard::copy(&value) {
+            Ok(how) => format!("copied ({})", how.label()),
+            Err(_) => "copy failed".to_string(),
+        };
         self.flags_captured += 1;
         self.burst_start = Some(self.tick);
         self.burst_label = format!("{} PWNED", which.to_uppercase());
-        self.set_status(format!("🚩 {which} flag saved + copied"));
+        self.set_status(format!("🚩 {which} flag saved + {copied}"));
         self.mode = Mode::Normal;
     }
 
@@ -2203,7 +2206,7 @@ impl App {
         if let Some(&i) = m.get(self.gtfo_idx) {
             let code = GTFOBINS[i].code;
             match clipboard::copy(code) {
-                Ok(_) => self.set_status(format!("✓ copied: {code}")),
+                Ok(how) => self.set_status(format!("✓ copied ({}): {code}", how.label())),
                 Err(e) => self.set_status(format!("✗ copy failed: {e}")),
             }
         }
