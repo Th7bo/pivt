@@ -47,18 +47,73 @@ fn append(path: &Path, text: &str) {
     }
 }
 
-/// Record a copied command. Returns the log path on success.
+/// Where job output is teed: `<room>/logs`, else ~/.local/share/pivt/logs.
+pub fn logs_dir(active_room: Option<&Room>) -> PathBuf {
+    match active_room {
+        Some(r) => r.path.join("logs"),
+        None => dirs::data_dir().unwrap_or_else(config_dir).join("pivt").join("logs"),
+    }
+}
+
+/// A fresh `<YYYYmmdd-HHMMSS>-<slug>.log` path for a job titled `title`.
+pub fn job_log_path(active_room: Option<&Room>, title: &str) -> PathBuf {
+    let dir = logs_dir(active_room);
+    let base = format!("{}-{}", now("%Y%m%d-%H%M%S"), slug(title));
+    let mut p = dir.join(format!("{base}.log"));
+    let mut n = 2;
+    while p.exists() {
+        p = dir.join(format!("{base}-{n}.log"));
+        n += 1;
+    }
+    p
+}
+
+/// "nmap Quick top-ports [2]" → "nmap-quick-top-ports-2" (max 48 chars).
+fn slug(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+    }
+    let out: String = out.trim_end_matches('-').chars().take(48).collect();
+    if out.is_empty() {
+        "job".into()
+    } else {
+        out.trim_end_matches('-').to_string()
+    }
+}
+
+/// How a job log is referenced from the room's markdown: relative to the
+/// room when it's inside it, else the full path.
+fn log_ref(active_room: Option<&Room>, log: &Path) -> String {
+    active_room
+        .and_then(|r| log.strip_prefix(&r.path).ok())
+        .unwrap_or(log)
+        .display()
+        .to_string()
+}
+
+/// Record a copied or run command (`job_log` = where a run's output goes).
+/// Returns the log path.
 pub fn log_command(
     active_room: Option<&Room>,
     target: &str,
     name: &str,
     category: &str,
     filled: &str,
+    job_log: Option<&Path>,
 ) -> PathBuf {
     let path = log_path(active_room, target);
     ensure_header(&path, target);
     let ts = now("%H:%M:%S");
-    let entry = format!("\n### `{name}`  ·  {category}  ·  {ts}\n```bash\n{filled}\n```\n");
+    let mut entry = format!("\n### `{name}`  ·  {category}  ·  {ts}\n```bash\n{filled}\n```\n");
+    if let Some(l) = job_log {
+        let r = log_ref(active_room, l);
+        entry.push_str(&format!("output: [{r}]({r})\n"));
+    }
     append(&path, &entry);
     path
 }
@@ -172,6 +227,26 @@ pub fn export(
         s.push('\n');
     }
 
+    // every job's full output, oldest first (names start with the timestamp)
+    if let Some(room) = active_room {
+        let mut logs: Vec<PathBuf> = std::fs::read_dir(logs_dir(Some(room)))
+            .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "log")).collect())
+            .unwrap_or_default();
+        logs.sort();
+        if !logs.is_empty() {
+            s.push_str("\n## Job output logs\n\nFull output of every command run from pivt (`less -R` keeps the colors).\n\n");
+            for l in &logs {
+                let r = log_ref(Some(room), l);
+                let first = std::fs::read_to_string(l)
+                    .ok()
+                    .and_then(|t| t.lines().nth(1).map(|c| c.trim_start_matches("$ ").to_string()))
+                    .unwrap_or_default();
+                let first: String = first.chars().take(100).collect();
+                s.push_str(&format!("- [{r}]({r}) — `{}`\n", first.replace('`', "'")));
+            }
+        }
+    }
+
     // carries the credentials table
     write_private(&out_path, s)?;
     Ok(out_path)
@@ -195,7 +270,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pivt-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let room = Room { name: "t".into(), path: dir.clone() };
-        let p = log_command(Some(&room), "10.0.0.1", "Quick scan", "nmap", "nmap -sC 10.0.0.1");
+        let p = log_command(Some(&room), "10.0.0.1", "Quick scan", "nmap", "nmap -sC 10.0.0.1", None);
         let body = std::fs::read_to_string(&p).unwrap();
         assert!(body.contains("# pivt log"));
         assert!(body.contains("nmap -sC 10.0.0.1"));
@@ -219,7 +294,12 @@ mod tests {
         let notes = std::fs::read_to_string(room.notes_file()).unwrap();
         assert!(notes.contains("| user | FLAG123 |"), "notes:\n{notes}");
         // a logged command so the export has a command section
-        log_command(Some(&room), "10.0.0.1", "scan", "nmap", "nmap 10.0.0.1");
+        let job_log = job_log_path(Some(&room), "scan [1]");
+        assert!(job_log.starts_with(dir.join("logs")) && job_log.to_string_lossy().ends_with("-scan-1.log"), "{job_log:?}");
+        std::fs::create_dir_all(job_log.parent().unwrap()).unwrap();
+        std::fs::write(&job_log, "── pivt job · scan ──\n$ nmap 10.0.0.1\n").unwrap();
+        assert_ne!(job_log_path(Some(&room), "scan [1]"), job_log, "names don't collide");
+        log_command(Some(&room), "10.0.0.1", "scan", "nmap", "nmap 10.0.0.1", Some(&job_log));
         let creds = vec![crate::loot::Cred { user: "svc".into(), pass: "pw".into(), hash: String::new(), note: "x".into() }];
         let out = export(Some(&room), "10.0.0.1", "codify.htb", "10.10.14.7", &creds).unwrap();
         let w = std::fs::read_to_string(&out).unwrap();
@@ -228,6 +308,9 @@ mod tests {
         assert!(w.contains("| svc | pw |"));
         assert!(w.contains("## Command log"));
         assert!(w.contains("nmap 10.0.0.1"));
+        let rel = job_log.strip_prefix(&dir).unwrap().display().to_string();
+        assert!(w.contains(&format!("output: [{rel}]({rel})")), "per-command link missing:\n{w}");
+        assert!(w.contains("## Job output logs") && w.contains(&format!("- [{rel}]({rel}) — `nmap 10.0.0.1`")), "{w}");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

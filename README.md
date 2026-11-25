@@ -56,6 +56,15 @@ returns to the last active room. `pivt --fresh` starts clean (the old session
 is overwritten on the next save). An unreadable or other-version session file
 is ignored with a status message.
 
+## Job logs
+
+Every job started from pivt (`x`, recipes, re-runs, cracks) also writes its
+full output to `<room>/logs/<YYYYmmdd-HHMMSS>-<name>.log` (no room:
+`~/.local/share/pivt/logs/`), colors kept, progress-bar redraws collapsed.
+Read them with `less -R`. The command log links each run to its output, and
+`E` lists them all in the exported writeup. Logs and other files holding
+credentials are created `0600`. `PIVT_NO_LOG=1` turns logging off.
+
 ## Hack The Box (`H`)
 
 Pulls the box straight from HTB Labs: name, OS, difficulty, IP, synopsis and

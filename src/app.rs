@@ -856,6 +856,7 @@ impl App {
                         &name,
                         &category,
                         &filled,
+                        None,
                     );
                     msg.push_str(&format!(" · logged → {}", short_path(&path)));
                 }
@@ -1273,11 +1274,12 @@ impl App {
             } else {
                 cmd.name.clone()
             };
-            match RunJob::spawn(title.clone(), cmd.wrap_for_run(&filled), rows, cols, cwd.as_deref()) {
+            let log = self.job_log(&title);
+            match RunJob::spawn_logged(title.clone(), cmd.wrap_for_run(&filled), rows, cols, cwd.as_deref(), log) {
                 Ok(job) => {
                     if self.logging {
                         let target = self.vars.get("RHOST").cloned().unwrap_or_default();
-                        writeup::log_command(self.active_room.as_ref(), &target, &title, &cmd.category, &filled);
+                        writeup::log_command(self.active_room.as_ref(), &target, &title, &cmd.category, &filled, job.log.as_deref());
                     }
                     self.runs.push(job);
                     spawned += 1;
@@ -1577,11 +1579,12 @@ impl App {
             crate::runner::prepare_output_dirs(&cmd, &dir);
         }
         let (rows, cols) = crate::runner::pane_size(self.run_fullscreen);
-        match RunJob::spawn(title.clone(), cmd.clone(), rows, cols, cwd.as_deref()) {
+        let log = self.job_log(&title);
+        match RunJob::spawn_logged(title.clone(), cmd.clone(), rows, cols, cwd.as_deref(), log) {
             Ok(new) => {
                 if self.logging {
                     let target = self.vars.get("RHOST").cloned().unwrap_or_default();
-                    writeup::log_command(self.active_room.as_ref(), &target, &title, "rerun", &cmd);
+                    writeup::log_command(self.active_room.as_ref(), &target, &title, "rerun", &cmd, new.log.as_deref());
                 }
                 self.runs[self.run_tab] = new;
                 self.interacting = false;
@@ -1589,6 +1592,12 @@ impl App {
             }
             Err(e) => self.set_status(format!("✗ spawn failed: {e}")),
         }
+    }
+
+    /// Where a new job's output is teed (`<room>/logs/…` or the data dir),
+    /// unless logging is off (PIVT_NO_LOG).
+    fn job_log(&self, title: &str) -> Option<PathBuf> {
+        self.logging.then(|| writeup::job_log_path(self.active_room.as_ref(), title))
     }
 
     /// Whether a run tab titled `title` ("name" or "name [n]") belongs to a
@@ -2074,11 +2083,12 @@ impl App {
         let title = format!("crack {who} ({})", kind.name);
         let (rows, cols) = crate::runner::pane_size(self.run_fullscreen);
         let cwd = self.active_room.as_ref().map(|r| r.path.clone());
-        match RunJob::spawn(title.clone(), cmd.clone(), rows, cols, cwd.as_deref()) {
+        let log = self.job_log(&title);
+        match RunJob::spawn_logged(title.clone(), cmd.clone(), rows, cols, cwd.as_deref(), log) {
             Ok(job) => {
                 if self.logging {
                     let target = self.vars.get("RHOST").cloned().unwrap_or_default();
-                    writeup::log_command(self.active_room.as_ref(), &target, &title, "crack", &cmd);
+                    writeup::log_command(self.active_room.as_ref(), &target, &title, "crack", &cmd, job.log.as_deref());
                 }
                 let job_id = job.id;
                 self.runs.push(job);

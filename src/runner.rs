@@ -2,8 +2,10 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
+use std::time::Duration;
 
 const SCROLLBACK: usize = 2000;
 const MAX_RAW: usize = 256 * 1024;
@@ -38,6 +40,15 @@ pub struct RunJob {
     pub scroll: usize,
     rows: u16,
     cols: u16,
+    /// File the output is teed to, if any.
+    pub log: Option<PathBuf>,
+    /// For the exit footer; dropped once it's written so the log closes.
+    log_tx: Option<mpsc::Sender<LogMsg>>,
+}
+
+enum LogMsg {
+    Data(Vec<u8>),
+    Footer(String),
 }
 
 impl RunJob {
@@ -47,6 +58,19 @@ impl RunJob {
         rows: u16,
         cols: u16,
         cwd: Option<&Path>,
+    ) -> std::io::Result<RunJob> {
+        Self::spawn_logged(title, cmd, rows, cols, cwd, None)
+    }
+
+    /// [`spawn`](Self::spawn), also teeing all output to `log` (created 0600).
+    /// A log that can't be opened is skipped rather than failing the job.
+    pub fn spawn_logged(
+        title: impl Into<String>,
+        cmd: impl Into<String>,
+        rows: u16,
+        cols: u16,
+        cwd: Option<&Path>,
+        log: Option<PathBuf>,
     ) -> std::io::Result<RunJob> {
         let title = title.into();
         let cmd = cmd.into();
@@ -74,16 +98,25 @@ impl RunJob {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK)));
         let raw = Arc::new(Mutex::new(String::new()));
         let eof = Arc::new(AtomicBool::new(false));
+        let (log, log_tx) = match log.and_then(|p| start_log(&p, &title, &cmd, cwd).map(|tx| (p, tx))) {
+            Some((p, tx)) => (Some(p), Some(tx)),
+            None => (None, None),
+        };
         {
             let p = parser.clone();
             let rawc = raw.clone();
             let e = eof.clone();
+            let tee = log_tx.clone();
             thread::spawn(move || {
                 let mut buf = [0u8; 8192];
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
+                            // never blocks: the log writer has its own thread
+                            if let Some(t) = &tee {
+                                let _ = t.send(LogMsg::Data(buf[..n].to_vec()));
+                            }
                             if let Ok(mut pr) = p.lock() {
                                 pr.process(&buf[..n]);
                             }
@@ -116,6 +149,8 @@ impl RunJob {
             scroll: 0,
             rows,
             cols,
+            log,
+            log_tx,
         })
     }
 
@@ -158,6 +193,8 @@ impl RunJob {
             scroll: 0,
             rows,
             cols,
+            log: None,
+            log_tx: None,
         }
     }
 
@@ -176,6 +213,17 @@ impl RunJob {
     }
 
     pub fn poll(&mut self) {
+        // once the output has drained, close the log with the exit status
+        if self.finished && self.eof.load(Ordering::SeqCst) {
+            if let Some(tx) = self.log_tx.take() {
+                let how = match self.exit {
+                    Some(-1) => "killed".to_string(),
+                    Some(c) => format!("exit {c}"),
+                    None => "ended".to_string(),
+                };
+                let _ = tx.send(LogMsg::Footer(format!("── {how} · {} ──", crate::room::now("%Y-%m-%d %H:%M:%S"))));
+            }
+        }
         if self.finished {
             return;
         }
@@ -260,6 +308,131 @@ impl Drop for RunJob {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+}
+
+/// Open `path` for appending and start the thread that writes to it.
+fn start_log(path: &Path, title: &str, cmd: &str, cwd: Option<&Path>) -> Option<mpsc::Sender<LogMsg>> {
+    if let Some(d) = path.parent() {
+        crate::model::create_private_dir(d).ok()?;
+    }
+    let f = crate::model::private_options().append(true).open(path).ok()?;
+    let cwd = cwd.map(|d| d.display().to_string()).or_else(|| {
+        std::env::current_dir().ok().map(|d| d.display().to_string())
+    });
+    let header = format!(
+        "── pivt job · {title} · {} ──\n$ {cmd}\n(cwd {})\n\n",
+        crate::room::now("%Y-%m-%d %H:%M:%S"),
+        cwd.unwrap_or_else(|| "?".into())
+    );
+    let (tx, rx) = mpsc::channel::<LogMsg>();
+    thread::spawn(move || {
+        let mut w = std::io::BufWriter::new(f);
+        let _ = w.write_all(header.as_bytes());
+        let mut filt = LogFilter::default();
+        loop {
+            match rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(LogMsg::Data(d)) => {
+                    let _ = w.write_all(&filt.feed(&d));
+                }
+                Ok(LogMsg::Footer(s)) => {
+                    let _ = w.write_all(&filt.finish());
+                    let _ = w.write_all(format!("\n{s}\n").as_bytes());
+                }
+                // idle: push what we have to disk so `tail -f` / less see it
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = w.flush();
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        let _ = w.write_all(&filt.finish());
+        let _ = w.flush();
+    });
+    Some(tx)
+}
+
+/// Turns a PTY byte stream into a log readable with `less -R`: colors (SGR)
+/// kept, other escape sequences dropped, CRLF → LF, a bare CR overwrites the
+/// line (progress bars keep only their last state), backspace erases.
+/// Works across chunk boundaries; lines are emitted when complete.
+#[derive(Default)]
+pub struct LogFilter {
+    line: Vec<u8>,
+    esc: Vec<u8>,
+    cr: bool,
+}
+
+impl LogFilter {
+    pub fn feed(&mut self, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for &b in data {
+            if !self.esc.is_empty() {
+                self.escape_byte(b);
+                continue;
+            }
+            if self.cr {
+                self.cr = false;
+                // bare CR: the line gets redrawn (CR CR LF is still a newline)
+                if b != b'\n' && b != b'\r' {
+                    self.line.clear();
+                }
+            }
+            match b {
+                0x1b => self.esc.push(b),
+                b'\n' => {
+                    out.append(&mut self.line);
+                    out.push(b'\n');
+                }
+                b'\r' => self.cr = true,
+                0x08 => {
+                    // drop one whole UTF-8 char
+                    while let Some(x) = self.line.pop() {
+                        if x & 0xc0 != 0x80 {
+                            break;
+                        }
+                    }
+                }
+                b'\t' => self.line.push(b),
+                0..=0x1f | 0x7f => {}
+                _ => self.line.push(b),
+            }
+        }
+        out
+    }
+
+    fn escape_byte(&mut self, b: u8) {
+        self.esc.push(b);
+        let e = &self.esc;
+        match e[1] {
+            b'[' if e.len() > 2 && (0x40..=0x7e).contains(&b) => {
+                if b == b'm' {
+                    self.line.extend_from_slice(e);
+                }
+                self.esc.clear();
+            }
+            b'[' => {
+                if e.len() > 64 {
+                    self.esc.clear();
+                }
+            }
+            // OSC: ends with BEL or ST (ESC \)
+            b']' => {
+                if b == 0x07 || (b == b'\\' && e[e.len() - 2] == 0x1b) || e.len() > 4096 {
+                    self.esc.clear();
+                }
+            }
+            // charset selection etc. take one more byte
+            b'(' | b')' | b'#' if e.len() < 3 => {}
+            _ => self.esc.clear(),
+        }
+    }
+
+    /// Whatever is left (a prompt without a newline).
+    pub fn finish(&mut self) -> Vec<u8> {
+        self.esc.clear();
+        self.cr = false;
+        std::mem::take(&mut self.line)
     }
 }
 
@@ -456,6 +629,59 @@ mod tests {
         assert_eq!(prepare_output_dirs("nmap -oN nmap/q.txt h; x > loot/a/b.txt", &d), vec!["nmap/", "loot/a/"]);
         assert!(d.join("nmap").is_dir() && d.join("loot/a").is_dir());
         assert!(prepare_output_dirs("nmap -oN nmap/q.txt h", &d).is_empty(), "already there");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn log_filter_cleans_pty_stream() {
+        let mut f = LogFilter::default();
+        let mut out = Vec::new();
+        // split mid-escape, mid-CRLF and mid-UTF-8 on purpose
+        for chunk in [
+            &b"\x1b[1;32mok\x1b[0m \x1b]0;title\x07line\r"[..],
+            b"\nprogress 10%\rprogress 100%\r\n\xe2\x9c",
+            b"\xa6 star\x1b[2K\x1b[",
+            b"Ksh$ lsx\x08 \x08\r\r\n\x1b(Bprompt$ ",
+        ] {
+            out.extend(f.feed(chunk));
+        }
+        out.extend(f.finish());
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\x1b[1;32mok\x1b[0m line\nprogress 100%\n✦ starsh$ ls\nprompt$ "
+        );
+    }
+
+    #[test]
+    fn job_output_is_teed_to_log() {
+        let d = std::env::temp_dir().join(format!("pivt-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let log = d.join("logs").join("t.log");
+        let mut j = RunJob::spawn_logged("t", "printf 'a\\033[31mred\\033[0m\\r\\nb\\n'; exit 2", 6, 40, None, Some(log.clone())).unwrap();
+        for _ in 0..80 {
+            j.poll();
+            if j.finished && j.log_tx.is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert_eq!(j.log.as_deref(), Some(log.as_path()));
+        let mut body = String::new();
+        for _ in 0..80 {
+            body = std::fs::read_to_string(&log).unwrap_or_default();
+            if body.contains("exit 2") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(body.contains("pivt job · t"), "{body}");
+        assert!(body.contains("a\x1b[31mred\x1b[0m\nb\n"), "{body:?}");
+        assert!(body.contains("── exit 2"), "{body}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&log).unwrap().permissions().mode() & 0o777, 0o600);
+        }
         std::fs::remove_dir_all(&d).ok();
     }
 
