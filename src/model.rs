@@ -156,6 +156,12 @@ pub struct Config {
     pub scope_mode: String,
     #[serde(default)]
     pub vars: BTreeMap<String, String>,
+    /// Custom keybindings (`[keys]`: action = "key" | ["key", …]). Kept as a
+    /// raw table so junk values are skipped with a warning instead of failing
+    /// the whole parse; see [`crate::keys`]. Tables go after every scalar
+    /// field, and it's only written when the user set something.
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
+    pub keys: toml::Table,
 }
 
 /// Write a file only its owner can read (0600), tightening an existing one.
@@ -713,6 +719,29 @@ mod tests {
         let back: Config = toml::from_str(&txt).unwrap();
         assert_eq!(back.favorites, vec!["nmap/Quick".to_string()]);
         assert_eq!(back.vars.get("RHOST").unwrap(), "10.0.0.1");
+    }
+
+    #[test]
+    fn config_keys_table_roundtrip_and_order() {
+        // no [keys] in a default config
+        let txt = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(!txt.contains("keys"), "{txt}");
+        let src = "theme = \"nord\"\nscope_mode = \"strict\"\n[keys]\nrun = \"X\"\nhistory = [\"y\", \"ctrl-r\"]\ndetach = [\"f12\", \"ctrl-]\"]\n[vars]\nRHOST = \"10.0.0.1\"\n";
+        let mut c: Config = toml::from_str(src).unwrap();
+        c.favorites.push("nmap/Quick".into());
+        let txt = toml::to_string_pretty(&c).unwrap();
+        let keys_pos = txt.find("[keys]").expect(&txt);
+        for scalar in ["favorites", "theme", "scope_mode", "flow_bg"] {
+            assert!(txt.find(scalar).unwrap() < keys_pos, "{scalar} after [keys]:\n{txt}");
+        }
+        let back: Config = toml::from_str(&txt).unwrap();
+        assert_eq!(back.keys, c.keys);
+        assert_eq!(back.theme, "nord");
+        assert_eq!(back.vars["RHOST"], "10.0.0.1");
+        let (m, w) = crate::keys::Keymap::from_config(&back.keys);
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(m.label(crate::keys::Action::Run), "X");
+        assert_eq!(m.label(crate::keys::Action::History), "y / ^r");
     }
 
     #[test]

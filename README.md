@@ -31,7 +31,7 @@ Runtime requirements (Linux):
 - A truecolor terminal and a font with good Unicode coverage
   (e.g. JetBrains Mono / any Nerd Font).
 
-Run `pivt`, press `?` for keybinds. Add your own commands in
+Run `pivt`, press `?` for keybinds ([remappable](#keybindings)). Add your own commands in
 `~/.config/pivt/commands.toml` (same `[[command]]` schema as the bundled
 `src/default_commands.toml`).
 
@@ -39,6 +39,100 @@ Screenshots are rendered headlessly:
 `PIVT_SNAP_ANSI=1 pivt snap normal > s.txt && python3 scripts/ansi2png.py s.txt s.png`.
 `snap` never reads or writes the saved session. Add `--theme <name>` (or set
 `PIVT_THEME=<name>`) to render any theme, e.g. `pivt snap normal --theme nord`.
+
+## Keybindings
+
+Every main-view action can be remapped in `~/.config/pivt/config.toml`.
+The defaults below are the built-in layout (picked to work on AZERTY too);
+only list what you want to change:
+
+```toml
+[keys]
+run = "x"
+zoom = "z"
+history = ["y", "ctrl-r"]   # several keys: a list
+detach = ["f12", "ctrl-]"]
+help = "f1"
+```
+
+Key syntax: a single character (case-sensitive: `L` ≠ `l`), optionally with
+`ctrl-`, `alt-` or `shift-` (`ctrl-r`, `alt-x`, `shift-tab`), or a named key:
+`f1`…`f12`, `enter`, `esc`, `tab`, `space`, `up` / `down` / `left` / `right`,
+`pgup` / `pgdn`, `home` / `end`, `delete`, `backspace`. Action names accept
+`-` for `_`. Setting an action replaces its default keys; `[]` unbinds it.
+
+`pivt keys` prints the effective map and any problems. The help overlay
+(`?`) and the footer always show the keys actually bound.
+
+**Rules.** An unknown action, a key that doesn't parse or a value of the
+wrong type is skipped with a warning in the status line at startup; the rest
+of the config still loads. A key bound to two actions in the same context is
+a conflict: a binding you wrote beats a default, and between two of yours
+the action listed first in the table below wins (both cases warn, a lost
+default only when it leaves that action with no key). The run-pane keys
+shadow the main-view ones only while the run pane is focused, so `d` meaning
+close there and delete elsewhere is not a conflict; keys the run pane doesn't
+bind fall through. `ctrl-c` is reserved: it always quits (asking first while
+jobs run) and is sent to the program while interacting. `help` falls back to
+`?` and `detach` to `f12` / `ctrl-]` if they end up with no key, so you can't
+lock yourself out. `Esc` (back / unzoom / clear search / quit) and the keys
+inside overlays (lists, prompts, text fields) are fixed.
+
+Main view:
+
+| action | default | does |
+|---|---|---|
+| `up` / `down` | `up` `k` / `down` `j` | move within a pane |
+| `focus_next` / `focus_prev` | `tab` `l` `right` / `shift-tab` `h` `left` | switch pane |
+| `copy` | `enter` | fill + copy (preview pane: edit the variable) |
+| `run` | `x` | run the command live |
+| `run_pane` | `` ` `` | show / hide the run pane |
+| `quit` | `q` | quit (`Esc` too, `ctrl-c` always) |
+| `vars` | `e` | variables editor |
+| `add` / `delete` | `a` / `d` | add / delete a user command |
+| `search` | `/` | fuzzy search |
+| `help` | `?` | help overlay |
+| `rooms` | `c` | rooms |
+| `note` | `w` | writeup note |
+| `notes` | `o` | open room notes in `$EDITOR` |
+| `loot` | `L` | loot / creds |
+| `favorite` | `f` | pin / unpin favorite |
+| `bg` | `b` | background effect |
+| `theme` / `theme_picker` | `t` / `T` | next theme / theme picker |
+| `discord` / `discord_privacy` | `D` / `M` | Discord presence on/off / privacy |
+| `gtfobins` | `g` | GTFOBins lookup |
+| `parse` | `P` | parse scan output |
+| `recipes` | `R` | recipes |
+| `htb` | `H` | Hack The Box panel |
+| `flag` | `F` | capture a flag |
+| `export` | `E` | export writeup |
+| `missing` | `m` | rescan PATH + hide/show missing tools |
+| `history` | `y` `ctrl-r` | command history |
+| `scope` | `S` | room scope editor |
+
+Run pane focused:
+
+| action | default | does |
+|---|---|---|
+| `scroll_down` / `scroll_up` | `down` `j` / `up` `k` | scroll output |
+| `page_down` / `page_up` | `pgdn` / `pgup` | scroll a page |
+| `tab_prev` / `tab_next` | `left` `[` / `right` `]` | switch run tab |
+| `kill` | `K` | kill the job |
+| `close` | `d` | close the tab |
+| `rerun` | `r` | re-run the tab |
+| `tail` | `g` | jump to the end |
+| `zoom` | `z` | zoom fullscreen |
+| `interact` | `i` `enter` | type into the program |
+
+Interacting with a job:
+
+| action | default | does |
+|---|---|---|
+| `detach` | `f12` `ctrl-]` | stop typing into the program |
+
+Inside an overlay, the key that opened it closes it again for help, the theme
+picker and scope (and the theme key steps through themes in the picker); for
+history only non-letter keys (`ctrl-r`, F-keys) do, so letters stay free.
 
 ## Missing tools
 

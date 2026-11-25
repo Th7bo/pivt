@@ -406,10 +406,45 @@ pub struct App {
     /// default scope) until it's changed.
     rhost_carried: Option<String>,
 
+    /// Resolved keybindings (config `[keys]` over the defaults).
+    pub keys: crate::keys::Keymap,
+    /// `[keys]` as written in config.toml, written back untouched.
+    keys_cfg: toml::Table,
+
     matcher: SkimMatcherV2,
 }
 
+/// The first status line: key warnings, then the LHOST note, else "ready".
+fn startup_status(lhost_note: Option<String>, key_warnings: &[String], keys: &crate::keys::Keymap) -> String {
+    use crate::keys::Action;
+    let mut parts = Vec::new();
+    if !key_warnings.is_empty() {
+        let n = key_warnings.len();
+        parts.push(format!(
+            "⚠ [keys] {n} problem{} (`pivt keys` lists them): {}",
+            if n == 1 { "" } else { "s" },
+            key_warnings.join(" · ")
+        ));
+    }
+    if let Some(n) = lhost_note {
+        parts.push(n);
+    }
+    if parts.is_empty() {
+        return format!(
+            "ready — type {} to search, {} for help",
+            keys.first(Action::Search),
+            keys.first(Action::Help)
+        );
+    }
+    parts.join(" · ")
+}
+
 impl App {
+    /// Label of the first key bound to `a`, for status hints.
+    pub fn key(&self, a: crate::keys::Action) -> String {
+        self.keys.first(a)
+    }
+
     pub fn new() -> Self {
         crate::theme::load_custom_dir(&crate::theme::custom_dir());
         Self::build(load_commands(), load_config(), true)
@@ -445,6 +480,7 @@ impl App {
         let favorites = cfg.favorites.clone();
         let recent = cfg.recent.clone();
         let flow_bg = cfg.flow_bg;
+        let (keys, key_warnings) = crate::keys::Keymap::from_config(&cfg.keys);
         crate::theme::set(crate::theme::resolve(&cfg.theme));
         let paths = Paths::from_config(&cfg);
         let path_cfg = (cfg.rooms_dir.clone(), cfg.room_template.clone(), cfg.sync_target_file.clone());
@@ -486,7 +522,10 @@ impl App {
                 lhost_changed = true;
             }
             netif::LhostCheck::Stale => {
-                lhost_note = Some(format!("⚠ LHOST {saved} isn't on any interface — VPN down? (e → r re-detects)"));
+                lhost_note = Some(format!(
+                    "⚠ LHOST {saved} isn't on any interface — VPN down? ({} → r re-detects)",
+                    keys.first(crate::keys::Action::Vars)
+                ));
             }
             netif::LhostCheck::Keep => {}
         }
@@ -540,7 +579,7 @@ impl App {
             focus: Focus::Categories,
             mode: if skip_splash { Mode::Normal } else { Mode::Splash },
             search: String::new(),
-            status: lhost_note.unwrap_or_else(|| "ready — type / to search, ? for help".into()),
+            status: startup_status(lhost_note, &key_warnings, &keys),
             should_quit: false,
             confirm_quit: false,
             tick: 0,
@@ -634,6 +673,8 @@ impl App {
             etc_hosts_path: PathBuf::from("/etc/hosts"),
             etc_hosts: Default::default(),
             rhost_carried,
+            keys,
+            keys_cfg: cfg.keys.clone(),
             matcher: SkimMatcherV2::default(),
         };
         app.refresh_scope();
@@ -1012,7 +1053,12 @@ impl App {
                 }
                 self.last_rpc_tick = 0; // push presence promptly
                 let m = self.discord_privacy;
-                self.set_status(format!("discord rich presence: on · {} ({}) · M cycles", m.as_str(), m.describe()));
+                self.set_status(format!(
+                    "discord rich presence: on · {} ({}) · {} cycles",
+                    m.as_str(),
+                    m.describe(),
+                    self.key(crate::keys::Action::DiscordPrivacy)
+                ));
             }
         } else {
             self.discord = None; // Drop clears the activity + closes the pipe
@@ -1097,7 +1143,12 @@ impl App {
         self.persist_config();
         let n = self.tool_missing.len();
         let what = if self.hide_missing { "hidden" } else { "shown (✗)" };
-        self.set_status(format!("rescanned PATH ({} programs) · {n} command{} with missing tools {what} · m toggles", self.tools.count(), if n == 1 { "" } else { "s" }));
+        self.set_status(format!(
+            "rescanned PATH ({} programs) · {n} command{} with missing tools {what} · {} toggles",
+            self.tools.count(),
+            if n == 1 { "" } else { "s" },
+            self.key(crate::keys::Action::Missing)
+        ));
     }
 
     /// Re-read PATH (tools installed while pivt runs).
@@ -1185,6 +1236,7 @@ impl App {
             room_template: self.path_cfg.1.clone(),
             sync_target_file: self.path_cfg.2.clone(),
             scope_mode: self.scope_mode_cfg.clone(),
+            keys: self.keys_cfg.clone(),
         };
         let _ = save_config(&cfg);
         // keep the shell target file (if enabled) + room .target in sync with RHOST
@@ -1453,7 +1505,7 @@ impl App {
         if let Some(r) = &self.active_room {
             self.pending_editor = Some(r.notes_file());
         } else {
-            self.set_status("no active room — press c to pick/create one");
+            self.set_status(format!("no active room — press {} to pick/create one", self.key(crate::keys::Action::Rooms)));
         }
     }
 
@@ -1592,9 +1644,10 @@ impl App {
         };
         let note = self.take_scope_note();
         self.set_status(format!(
-            "▶ running {} ({spawned} tab{}){made} · i to interact{note}",
+            "▶ running {} ({spawned} tab{}){made} · {} to interact{note}",
             cmd.name,
-            if spawned == 1 { "" } else { "s" }
+            if spawned == 1 { "" } else { "s" },
+            self.key(crate::keys::Action::Interact)
         ));
     }
 
@@ -1612,9 +1665,10 @@ impl App {
         if !oos.is_empty() {
             if self.scope_mode != crate::scope::Mode::Warn {
                 self.set_status(format!(
-                    "⛔ {}: {} is outside this room's scope — not run (S edits the scope)",
+                    "⛔ {}: {} is outside this room's scope — not run ({} edits the scope)",
                     cmd.name,
-                    oos.join(", ")
+                    oos.join(", "),
+                    self.key(crate::keys::Action::Scope)
                 ));
                 return 0;
             }
@@ -1748,8 +1802,9 @@ impl App {
             }
             M::Strict => {
                 self.set_status(format!(
-                    "⛔ {} outside this room's scope ({summary}) — strict mode, not run · S edits the scope",
-                    hosts.join(", ")
+                    "⛔ {} outside this room's scope ({summary}) — strict mode, not run · {} edits the scope",
+                    hosts.join(", "),
+                    self.key(crate::keys::Action::Scope)
                 ));
                 false
             }
@@ -1844,7 +1899,7 @@ impl App {
     pub fn open_scope(&mut self, room: Option<Room>) {
         let from_rooms = room.is_some();
         let Some(r) = room.or_else(|| self.active_room.clone()) else {
-            self.set_status("no active room — scope is per room (c picks or creates one)");
+            self.set_status(format!("no active room — scope is per room ({} picks or creates one)", self.key(crate::keys::Action::Rooms)));
             return;
         };
         self.scope_edit = ScopeEditor { room: Some(r), idx: 0, input: None, from_rooms };
@@ -2070,7 +2125,7 @@ impl App {
             .cloned()
             .collect();
         if picked.is_empty() {
-            self.set_status("no recipe matches PORTS yet — run a scan and press P first");
+            self.set_status(format!("no recipe matches PORTS yet — run a scan and press {} first", self.key(crate::keys::Action::Parse)));
             return;
         }
         self.run_recipes(&picked);
@@ -2156,7 +2211,7 @@ impl App {
         let mut msg = format!("▶ {names}: {started} tab{}", if started == 1 { "" } else { "s" });
         let waiting = self.sequence.queue.len();
         if waiting > 0 {
-            msg.push_str(&format!(" · {waiting} queued, one at a time (K stops the sequence)"));
+            msg.push_str(&format!(" · {waiting} queued, one at a time ({} stops the sequence)", self.key(crate::keys::Action::Kill)));
         }
         if !skipped.is_empty() {
             msg.push_str(&format!(" · skipped {}", skipped.join("; ")));
@@ -2290,7 +2345,7 @@ impl App {
             return;
         };
         if job.is_running() {
-            self.set_status("still running — K to kill it first");
+            self.set_status(format!("still running — {} to kill it first", self.key(crate::keys::Action::Kill)));
             return;
         }
         let (title, cmd) = (job.title.clone(), job.cmd.clone());
@@ -2328,7 +2383,7 @@ impl App {
                 self.runs[self.run_tab] = new;
                 self.interacting = false;
                 let note = self.take_scope_note();
-                self.set_status(format!("↻ re-running {title} · i to interact{note}"));
+                self.set_status(format!("↻ re-running {title} · {} to interact{note}", self.key(crate::keys::Action::Interact)));
             }
             Err(e) => self.set_status(format!("✗ spawn failed: {e}")),
         }
@@ -2535,7 +2590,7 @@ impl App {
                 self.mode = Mode::Normal;
                 self.show_runs_from(first_new);
                 let note = self.take_scope_note();
-                self.set_status(format!("↻ re-running {} from history · i to interact{note}", e.name));
+                self.set_status(format!("↻ re-running {} from history · {} to interact{note}", e.name, self.key(crate::keys::Action::Interact)));
             }
             Err(err) => self.set_status(format!("✗ spawn failed: {err}")),
         }
@@ -2639,7 +2694,11 @@ impl App {
         let when = session::age(s.saved_at, crate::discord::now_unix());
         let mut msg = format!("↺ restored session ({when})");
         if n > 0 {
-            msg.push_str(&format!(" · {n} tab{} · r re-runs in the run pane", if n == 1 { "" } else { "s" }));
+            msg.push_str(&format!(
+                " · {n} tab{} · {} re-runs in the run pane",
+                if n == 1 { "" } else { "s" },
+                self.key(crate::keys::Action::Rerun)
+            ));
         }
         self.set_status(msg);
     }
@@ -2844,7 +2903,7 @@ impl App {
         if self.active_run().map(|j| j.is_running()).unwrap_or(false) {
             self.interacting = true;
             self.run_tail();
-            self.set_status("-- interacting -- Ctrl-] to detach");
+            self.set_status(format!("-- interacting -- {} to detach", self.keys.compact(crate::keys::Action::Detach)));
         } else {
             self.set_status("job finished — nothing to type into");
         }
@@ -2860,7 +2919,7 @@ impl App {
     }
     pub fn toggle_run_pane(&mut self) {
         if self.runs.is_empty() {
-            self.set_status("nothing running — press x on a command to run it");
+            self.set_status(format!("nothing running — press {} on a command to run it", self.key(crate::keys::Action::Run)));
             return;
         }
         self.show_run = !self.show_run;

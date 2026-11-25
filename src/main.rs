@@ -6,6 +6,7 @@ mod gtfobins;
 mod hashid;
 mod history;
 mod htb;
+mod keys;
 mod loot;
 mod model;
 mod netif;
@@ -21,6 +22,7 @@ mod ui;
 mod writeup;
 
 use app::{App, Focus, Mode};
+use keys::{Action, Ctx};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
@@ -40,6 +42,10 @@ fn main() -> io::Result<()> {
         snapshot(&args[2], theme_arg(&args).as_deref());
         return Ok(());
     }
+    if args.len() >= 2 && args[1] == "keys" {
+        print_keys();
+        return Ok(());
+    }
     install_panic_hook();
     let mut terminal = setup()?;
     let mut app = App::new();
@@ -53,6 +59,30 @@ fn main() -> io::Result<()> {
     app.save_session(true);
     app.persist_config();
     res
+}
+
+/// `pivt keys`: the effective keybindings (config `[keys]` over defaults).
+fn print_keys() {
+    let cfg = model::load_config();
+    let (map, warnings) = keys::Keymap::from_config(&cfg.keys);
+    let mut last = None;
+    for &a in keys::Action::ALL {
+        if last != Some(a.ctx()) {
+            last = Some(a.ctx());
+            println!(
+                "{}",
+                match a.ctx() {
+                    keys::Ctx::Normal => "# normal mode",
+                    keys::Ctx::Run => "\n# run pane focused (other keys fall through to normal)",
+                    keys::Ctx::Interact => "\n# interacting with a job",
+                }
+            );
+        }
+        println!("{:<16} {:<18} {}", a.name(), map.label(a), a.describe());
+    }
+    for w in warnings {
+        eprintln!("warning: {w}");
+    }
 }
 
 /// `--theme <name>` / `--theme=<name>`, else `$PIVT_THEME`: a theme for this
@@ -513,11 +543,10 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
     // interacting with a job's PTY: keystrokes go to the program.
-    // Detach with F12 (layout-independent; Ctrl-] also works on QWERTY).
+    // Detach with the `detach` keys (default F12, layout-independent; Ctrl-]
+    // also works on QWERTY).
     if app.mode == Mode::Normal && app.focus == Focus::Run && app.interacting {
-        let detach = key.code == KeyCode::F(12)
-            || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char(']'));
-        if detach {
+        if app.keys.is(Action::Detach, &key) {
             app.end_interact();
             return;
         }
@@ -538,7 +567,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Vars => vars_keys(app, key),
         Mode::Add => add_keys(app, key),
         Mode::Help => {
-            if matches!(key.code, KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Enter) {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) || app.keys.is(Action::Help, &key) {
                 app.mode = Mode::Normal;
             }
         }
@@ -552,11 +581,14 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Recipes => recipe_keys(app, key),
         Mode::Htb => htb_keys(app, key),
         Mode::Theme => match key.code {
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('t') => app.theme_pick_move(true),
+            KeyCode::Down | KeyCode::Char('j') => app.theme_pick_move(true),
             KeyCode::Up | KeyCode::Char('k') => app.theme_pick_move(false),
             KeyCode::Enter => app.theme_pick_confirm(),
             KeyCode::Char('r') => app.reload_themes(),
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('T') => app.theme_pick_cancel(),
+            KeyCode::Esc | KeyCode::Char('q') => app.theme_pick_cancel(),
+            // the theme keys keep working inside the picker: next / close
+            _ if app.keys.is(Action::Theme, &key) => app.theme_pick_move(true),
+            _ if app.keys.is(Action::ThemePicker, &key) => app.theme_pick_cancel(),
             _ => {}
         },
         Mode::History => history_keys(app, key),
@@ -688,7 +720,12 @@ fn history_keys(app: &mut App, key: KeyEvent) {
             app.history_idx = 0;
         }
         KeyCode::Esc | KeyCode::Char('q') => app.mode = Mode::Normal,
-        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => app.mode = Mode::Normal,
+        // a history key that isn't a plain letter (^r, F-keys) toggles it shut
+        _ if app.keys.is(Action::History, &key)
+            && !(matches!(key.code, KeyCode::Char(_)) && keys::Key::from_event(&key).mods.is_empty()) =>
+        {
+            app.mode = Mode::Normal
+        }
         KeyCode::Down | KeyCode::Char('j') => app.history_next(),
         KeyCode::Up | KeyCode::Char('k') => app.history_prev(),
         KeyCode::Char('/') => app.history_typing = true,
@@ -714,13 +751,14 @@ fn scope_keys(app: &mut App, key: KeyEvent) {
         return;
     }
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('S') => app.close_scope(),
+        KeyCode::Esc | KeyCode::Char('q') => app.close_scope(),
         KeyCode::Down | KeyCode::Char('j') => app.scope_edit_move(true),
         KeyCode::Up | KeyCode::Char('k') => app.scope_edit_move(false),
         KeyCode::Char('a') | KeyCode::Char('n') => app.scope_edit.input = Some(String::new()),
         KeyCode::Char('d') | KeyCode::Delete => app.scope_edit_delete(),
         KeyCode::Char('r') => app.scope_edit_reset(),
         KeyCode::Char('m') => app.scope_cycle_mode(),
+        _ if app.keys.is(Action::Scope, &key) => app.close_scope(),
         _ => {}
     }
 }
@@ -921,68 +959,90 @@ fn normal_keys(app: &mut App, key: KeyEvent) {
         }
         return;
     }
-    // ^r: history (before the run pane, where plain r re-runs)
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
-        app.open_history();
+    // run pane focused: its bindings shadow the normal ones, exact matches
+    // first (so ^r is history even though plain r re-runs there)
+    let ctxs: &[Ctx] = if app.focus == Focus::Run { &[Ctx::Run, Ctx::Normal] } else { &[Ctx::Normal] };
+    if let Some(a) = app.keys.resolve(ctxs, &key) {
+        dispatch(app, a);
         return;
     }
-    // run pane has focus: its keys take priority
-    if app.focus == Focus::Run && run_focus_keys(app, key) {
-        return;
-    }
-    match key.code {
-        KeyCode::Char('q') => app.request_quit(),
-        KeyCode::Esc => {
-            if !app.search.is_empty() {
-                app.search.clear();
-                app.after_mutation();
+    // Esc stays fixed: unzoom / leave the run pane, else clear search / quit
+    if key.code == KeyCode::Esc {
+        if app.focus == Focus::Run {
+            if app.run_fullscreen {
+                app.run_fullscreen = false; // unzoom back to the split view
             } else {
-                app.request_quit();
+                app.focus = Focus::Commands;
             }
+        } else if !app.search.is_empty() {
+            app.search.clear();
+            app.after_mutation();
+        } else {
+            app.request_quit();
         }
-        KeyCode::Char('x') => app.run_selected(),
-        KeyCode::Char('`') => app.toggle_run_pane(),
-        KeyCode::Tab | KeyCode::Char('l') | KeyCode::Right => cycle_focus(app, true),
-        KeyCode::BackTab | KeyCode::Char('h') | KeyCode::Left => cycle_focus(app, false),
-        KeyCode::Down | KeyCode::Char('j') => move_down(app),
-        KeyCode::Up | KeyCode::Char('k') => move_up(app),
-        KeyCode::Enter => {
+    }
+}
+
+/// Perform a remappable action (see [`keys::Action`]).
+fn dispatch(app: &mut App, a: Action) {
+    match a {
+        Action::Quit => app.request_quit(),
+        Action::Run => app.run_selected(),
+        Action::RunPane => app.toggle_run_pane(),
+        Action::FocusNext => cycle_focus(app, true),
+        Action::FocusPrev => cycle_focus(app, false),
+        Action::Down => move_down(app),
+        Action::Up => move_up(app),
+        Action::Copy => {
             if app.focus == Focus::Preview {
                 app.inline_begin();
             } else {
                 app.copy_selected();
             }
         }
-        KeyCode::Char('e') => {
+        Action::Vars => {
             app.var_idx = 0;
             app.var_editing = false;
             app.var_new_key = None;
             app.mode = Mode::Vars;
         }
-        KeyCode::Char('a') => app.add_open(),
-        KeyCode::Char('d') => app.delete_selected(),
-        KeyCode::Char('/') => app.mode = Mode::Search,
-        KeyCode::Char('?') => app.mode = Mode::Help,
-        KeyCode::Char('c') => app.open_rooms(),
-        KeyCode::Char('w') => app.note_open(),
-        KeyCode::Char('o') => app.open_active_notes(),
-        KeyCode::Char('L') => app.open_loot(),
-        KeyCode::Char('f') => app.toggle_favorite(),
-        KeyCode::Char('b') => app.toggle_bg(),
-        KeyCode::Char('t') => app.cycle_theme(true),
-        KeyCode::Char('T') => app.open_theme_picker(),
-        KeyCode::Char('D') => app.toggle_discord(),
-        KeyCode::Char('M') => app.cycle_discord_privacy(),
-        KeyCode::Char('g') => app.open_gtfo(),
-        KeyCode::Char('P') => app.parse_scan(),
-        KeyCode::Char('R') => app.open_recipes(),
-        KeyCode::Char('H') => app.open_htb(),
-        KeyCode::Char('F') => app.flag_open(),
-        KeyCode::Char('E') => app.export_open(),
-        KeyCode::Char('m') => app.toggle_hide_missing(),
-        KeyCode::Char('y') => app.open_history(),
-        KeyCode::Char('S') => app.open_scope(None),
-        _ => {}
+        Action::Add => app.add_open(),
+        Action::Delete => app.delete_selected(),
+        Action::Search => app.mode = Mode::Search,
+        Action::Help => app.mode = Mode::Help,
+        Action::Rooms => app.open_rooms(),
+        Action::Note => app.note_open(),
+        Action::Notes => app.open_active_notes(),
+        Action::Loot => app.open_loot(),
+        Action::Favorite => app.toggle_favorite(),
+        Action::Bg => app.toggle_bg(),
+        Action::Theme => app.cycle_theme(true),
+        Action::ThemePicker => app.open_theme_picker(),
+        Action::Discord => app.toggle_discord(),
+        Action::DiscordPrivacy => app.cycle_discord_privacy(),
+        Action::Gtfobins => app.open_gtfo(),
+        Action::Parse => app.parse_scan(),
+        Action::Recipes => app.open_recipes(),
+        Action::Htb => app.open_htb(),
+        Action::Flag => app.flag_open(),
+        Action::Export => app.export_open(),
+        Action::Missing => app.toggle_hide_missing(),
+        Action::History => app.open_history(),
+        Action::Scope => app.open_scope(None),
+        // run pane
+        Action::ScrollDown => app.run_scroll_down(1),
+        Action::ScrollUp => app.run_scroll_up(1),
+        Action::PageDown => app.run_scroll_down(10),
+        Action::PageUp => app.run_scroll_up(10),
+        Action::TabPrev => app.run_tab_prev(),
+        Action::TabNext => app.run_tab_next(),
+        Action::Kill => app.run_kill_active(),
+        Action::Close => app.run_close_active(),
+        Action::Rerun => app.run_rerun_active(),
+        Action::Tail => app.run_tail(),
+        Action::Zoom => app.toggle_run_fullscreen(),
+        Action::Interact => app.begin_interact(),
+        Action::Detach => app.end_interact(),
     }
 }
 
@@ -1002,32 +1062,6 @@ fn cycle_focus(app: &mut App, forward: bool) {
         app.preview_var_idx = 0;
         app.clamp_preview_var();
     }
-}
-
-fn run_focus_keys(app: &mut App, key: KeyEvent) -> bool {
-    match key.code {
-        KeyCode::Down | KeyCode::Char('j') => app.run_scroll_down(1),
-        KeyCode::Up | KeyCode::Char('k') => app.run_scroll_up(1),
-        KeyCode::PageDown => app.run_scroll_down(10),
-        KeyCode::PageUp => app.run_scroll_up(10),
-        KeyCode::Left | KeyCode::Char('[') => app.run_tab_prev(),
-        KeyCode::Right | KeyCode::Char(']') => app.run_tab_next(),
-        KeyCode::Char('K') => app.run_kill_active(),
-        KeyCode::Char('d') => app.run_close_active(),
-        KeyCode::Char('r') => app.run_rerun_active(),
-        KeyCode::Char('g') => app.run_tail(),
-        KeyCode::Char('z') => app.toggle_run_fullscreen(),
-        KeyCode::Char('i') | KeyCode::Enter => app.begin_interact(),
-        KeyCode::Esc => {
-            if app.run_fullscreen {
-                app.run_fullscreen = false; // unzoom back to the split view
-            } else {
-                app.focus = Focus::Commands;
-            }
-        }
-        _ => return false,
-    }
-    true
 }
 
 /// Encode a key event into the bytes a PTY program expects on stdin.
@@ -1258,5 +1292,108 @@ mod tests {
             pty_paste_bytes("x\x1b[201~rm -rf ~\n", true),
             b"\x1b[200~xrm -rf ~\r\x1b[201~".to_vec()
         );
+    }
+
+    fn keyed(src: &str) -> App {
+        let mut app = App::for_tests();
+        app.mode = Mode::Normal;
+        let (map, _) = keys::Keymap::from_config(&toml::from_str(src).unwrap());
+        app.keys = map;
+        app
+    }
+
+    fn render(app: &App) -> String {
+        use ratatui::backend::TestBackend;
+        let mut term = Terminal::new(TestBackend::new(110, 32)).unwrap();
+        term.draw(|f| ui::draw(f, app)).unwrap();
+        let buf = term.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn remapped_keys_drive_the_app() {
+        let press = |app: &mut App, code, mods| handle_key(app, KeyEvent::new(code, mods));
+        let n = KeyModifiers::NONE;
+        // defaults: ? help, esc closes
+        let mut app = keyed("");
+        press(&mut app, KeyCode::Char('?'), n);
+        assert!(app.mode == Mode::Help);
+        press(&mut app, KeyCode::Esc, n);
+        assert!(app.mode == Mode::Normal);
+        // rebound: F1 help (and F1 closes it), ? does nothing, H → search
+        let mut app = keyed("help = \"f1\"\nsearch = \"H\"\nhtb = \"ctrl-b\"");
+        press(&mut app, KeyCode::Char('?'), n);
+        assert!(app.mode == Mode::Normal);
+        press(&mut app, KeyCode::F(1), n);
+        assert!(app.mode == Mode::Help);
+        press(&mut app, KeyCode::F(1), n);
+        assert!(app.mode == Mode::Normal);
+        press(&mut app, KeyCode::Char('H'), KeyModifiers::SHIFT);
+        assert!(app.mode == Mode::Search);
+        // ctrl-c still quits whatever the map says
+        let mut app = keyed("quit = []");
+        press(&mut app, KeyCode::Char('q'), n);
+        assert!(!app.should_quit);
+        press(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(app.should_quit || app.confirm_quit);
+        // configurable detach; F12 then goes to the program instead
+        let mut app = keyed("detach = [\"f10\", \"ctrl-g\"]");
+        app.focus = Focus::Run;
+        app.interacting = true;
+        press(&mut app, KeyCode::F(12), n);
+        assert!(app.interacting);
+        press(&mut app, KeyCode::F(10), n);
+        assert!(!app.interacting);
+        app.interacting = true;
+        press(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        assert!(!app.interacting);
+        // run pane: zoom remapped, old key falls through to normal (z unbound)
+        let mut app = keyed("zoom = \"Z\"");
+        app.focus = Focus::Run;
+        press(&mut app, KeyCode::Char('Z'), KeyModifiers::SHIFT);
+        assert!(app.run_fullscreen);
+        press(&mut app, KeyCode::Esc, n);
+        assert!(!app.run_fullscreen, "esc stays fixed: unzoom");
+        // history: ^r toggles it shut, a plain bound letter doesn't
+        let mut app = keyed("");
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert!(app.mode == Mode::History);
+        press(&mut app, KeyCode::Char('y'), n);
+        assert!(app.mode == Mode::History);
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert!(app.mode == Mode::Normal);
+    }
+
+    #[test]
+    fn help_and_footer_show_bound_keys() {
+        let app = keyed("");
+        let footer = render(&app);
+        assert!(footer.contains("x run") && footer.contains("? help"), "{footer}");
+        let mut app = keyed(
+            "run = \"X\"\nhelp = \"f1\"\nhistory = [\"F5\", \"ctrl-h\"]\nzoom = \"Z\"\ndetach = \"f10\"\nkill = \"alt-k\"",
+        );
+        let out = render(&app);
+        assert!(out.contains("X run") && out.contains("F1 help"), "{out}");
+        assert!(!out.contains("x run"));
+        app.mode = Mode::Help;
+        let help = render(&app);
+        assert!(help.contains("F5 / ^h"), "{help}");
+        assert!(help.contains("F10 detach"), "{help}");
+        assert!(help.contains("alt-k / d / r"), "{help}");
+        assert!(help.contains("  X  ") || help.contains("X           run it live"), "{help}");
+        // run pane footer
+        app.mode = Mode::Normal;
+        app.focus = Focus::Run;
+        let run = render(&app);
+        assert!(run.contains("Z zoom") && run.contains("alt-k kill"), "{run}");
+        app.interacting = true;
+        assert!(render(&app).contains("F10 detach"));
     }
 }

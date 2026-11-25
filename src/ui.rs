@@ -1,4 +1,5 @@
 use crate::app::{AddField, App, Focus, Mode};
+use crate::keys::Action;
 use crate::model::extract_placeholders;
 use crate::theme::{category_style, theme};
 use ratatui::prelude::*;
@@ -709,7 +710,11 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
         .title(Span::styled(" command ", Style::default().fg(theme().accent)))
         .title(
             Line::from(Span::styled(
-                if cmd.is_target() { " ⏎ copy · run it on the box " } else { " ⏎ copy " },
+                if cmd.is_target() {
+                    format!(" {} copy · run it on the box ", app.key(Action::Copy))
+                } else {
+                    format!(" {} copy ", app.key(Action::Copy))
+                },
                 Style::default().fg(theme().dim),
             ))
             .right_aligned(),
@@ -733,9 +738,9 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
 
     // vars label — hint changes when the pane is focused
     let hint = if focused {
-        "  ↑↓ pick · ⏎ edit here"
+        format!("  {} pick · {} edit here", first_pair(&app.keys, Action::Down, Action::Up), app.key(Action::Copy))
     } else {
-        "  ⇥ focus · e popup"
+        format!("  {} focus · {} popup", app.key(Action::FocusNext), app.key(Action::Vars))
     };
     f.render_widget(
         Paragraph::new(Line::from(vec![
@@ -803,20 +808,36 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     // run-pane focus has its own hint set
+    let k = &app.keys;
     if app.mode == Mode::Normal && app.focus == Focus::Run {
         let zoom = if app.run_fullscreen { "unzoom" } else { "zoom" };
-        let pairs: &[(&str, &str)] = if app.interacting {
-            &[("⌨", "typing → program"), ("F12", "detach")]
+        let scroll = || first_pair(k, Action::ScrollDown, Action::ScrollUp);
+        let tab = || first_pair(k, Action::TabPrev, Action::TabNext);
+        let pairs: Vec<(String, &str)> = if app.interacting {
+            vec![("⌨".into(), "typing → program"), (k.compact(Action::Detach), "detach")]
         } else if app.active_run().is_some_and(|j| !j.is_running()) {
             // finished / restored tab: nothing to type into, offer a re-run
-            &[("r", "re-run"), ("z", zoom), ("↑↓", "scroll"), ("←→", "tab"), ("d", "close"), ("g", "tail")]
+            vec![
+                (k.first(Action::Rerun), "re-run"), (k.first(Action::Zoom), zoom), (scroll(), "scroll"),
+                (tab(), "tab"), (k.first(Action::Close), "close"), (k.first(Action::Tail), "tail"),
+            ]
         } else {
-            &[
-                ("i", "interact"), ("z", zoom),
-                ("↑↓", "scroll"), ("←→", "tab"), ("K", "kill"), ("d", "close"), ("g", "tail"),
+            vec![
+                (k.first(Action::Interact), "interact"), (k.first(Action::Zoom), zoom),
+                (scroll(), "scroll"), (tab(), "tab"), (k.first(Action::Kill), "kill"),
+                (k.first(Action::Close), "close"), (k.first(Action::Tail), "tail"),
             ]
         };
-        render_footer(f, app, area, pairs);
+        render_footer(f, app, area, &pairs);
+        return;
+    }
+    if app.mode == Mode::Normal {
+        let pairs: Vec<(String, &str)> = vec![
+            (k.first(Action::FocusNext), "pane"), (k.first(Action::Copy), "copy"), (k.first(Action::Run), "run"),
+            (k.first(Action::Vars), "vars"), (k.first(Action::Rooms), "room"), (k.first(Action::Loot), "loot"),
+            (k.first(Action::Note), "note"), (k.first(Action::Search), "find"), (k.first(Action::Help), "help"),
+        ];
+        render_footer(f, app, area, &pairs);
         return;
     }
     let pairs: &[(&str, &str)] = match app.mode {
@@ -841,21 +862,35 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Mode::History => &[("↑↓", "move"), ("⏎", "copy"), ("x", "re-run"), ("l", "log"), ("/", "filter"), ("esc", "close")],
         Mode::Htb if app.htb_input.is_some() => &[("type", "answer"), ("⏎", "submit"), ("esc", "cancel")],
         Mode::Htb => &[("↑↓", "task"), ("⏎", "answer"), ("h", "hint"), ("m", "machine"), ("s/t", "spawn/stop"), ("r", "refresh"), ("esc", "close")],
-        Mode::Normal => &[
-            ("↹", "pane"), ("⏎", "copy"), ("x", "run"), ("e", "vars"),
-            ("c", "room"), ("L", "loot"), ("w", "note"), ("/", "find"), ("?", "help"),
-        ],
+        Mode::Normal => &[],
     };
     render_footer(f, app, area, pairs);
 }
 
-fn render_footer(f: &mut Frame, app: &App, area: Rect, pairs: &[(&str, &str)]) {
+/// `↑↓`-style hint from the first key of two opposite actions.
+fn first_pair(k: &crate::keys::Keymap, a: Action, b: Action) -> String {
+    match (k.keys(a).first(), k.keys(b).first()) {
+        (Some(x), Some(y)) => {
+            use crossterm::event::KeyCode::{Down, Left, Right, Up};
+            match (x.code, y.code) {
+                _ if !x.mods.is_empty() || !y.mods.is_empty() => format!("{}/{}", x.label(), y.label()),
+                (Down, Up) | (Up, Down) => "↑↓".into(),
+                (Left, Right) | (Right, Left) => "←→".into(),
+                _ => format!("{}{}", x.label(), y.label()),
+            }
+        }
+        (Some(x), None) | (None, Some(x)) => x.label(),
+        (None, None) => format!("[{}]", a.name()),
+    }
+}
+
+fn render_footer<K: AsRef<str>>(f: &mut Frame, app: &App, area: Rect, pairs: &[(K, &str)]) {
     let mut spans: Vec<Span> = Vec::new();
     for (i, (k, lbl)) in pairs.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(" · ", Style::default().fg(theme().border)));
         }
-        spans.push(Span::styled((*k).to_string(), Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(k.as_ref().to_string(), Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)));
         spans.push(Span::styled(format!(" {lbl}"), Style::default().fg(theme().dim)));
     }
     spans.push(Span::raw(" "));
@@ -1382,7 +1417,7 @@ fn draw_htb(f: &mut Frame, app: &App) {
                 Line::from(""),
                 Line::from(Span::styled("1. app.hackthebox.com → avatar → Account Settings → App Tokens → Create", Style::default().fg(theme().dim))),
                 Line::from(Span::styled(format!("2. save it to {} (chmod 600), or export HTB_TOKEN", path.display()), Style::default().fg(theme().dim))),
-                Line::from(Span::styled("3. restart pivt and press H", Style::default().fg(theme().dim))),
+                Line::from(Span::styled(format!("3. restart pivt and press {}", app.key(Action::Htb)), Style::default().fg(theme().dim))),
             ])
             .wrap(Wrap { trim: true }),
             inner.inner(Margin { horizontal: 1, vertical: 1 }),
@@ -2205,45 +2240,53 @@ fn draw_help(f: &mut Frame, app: &App) {
             Span::styled(d.to_string(), Style::default().fg(theme().fg)),
         ])
     };
+    use Action as A;
+    let k = &app.keys;
+    let l = |a: Action| k.label(a);
+    let j = |acts: &[Action]| acts.iter().map(|a| k.label(*a)).collect::<Vec<_>>().join(" / ");
     let lines = vec![
         Line::from(Span::styled(" navigation", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD))),
-        row("tab / ←→", "switch pane (categories ↔ commands)"),
-        row("↑↓ / jk", "move within a pane"),
+        row(&k.pair(A::FocusNext, A::FocusPrev), "switch pane (categories ↔ commands)"),
+        row(&k.pair(A::Down, A::Up), "move within a pane"),
         Line::from(Span::styled(" actions", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD))),
-        row("enter", "fill from vars + copy (and log it)"),
-        row("x", "run it live (◎ target: copy only · ✗ tool missing)"),
-        row("m", "hide / show ✗ commands whose tool isn't installed"),
-        row("P", "parse scan output → PORTS + ✸ suggested"),
-        row("R", "recipes: run command bundles · A = all matched"),
-        row("H", "Hack The Box: machine, guided tasks + hints, flags"),
-        row("e", "edit variables (split: this cmd / all)"),
-        row("f", "pin ★ favorite (shows ★/⏱ categories)"),
-        row("b / t / T", &format!(
-            "background fx · t / T theme: {}",
+        row(&l(A::Copy), "fill from vars + copy (and log it)"),
+        row(&l(A::Run), "run it live (◎ target: copy only · ✗ tool missing)"),
+        row(&l(A::Missing), "hide / show ✗ commands whose tool isn't installed"),
+        row(&l(A::Parse), "parse scan output → PORTS + ✸ suggested"),
+        row(&l(A::Recipes), "recipes: run command bundles · A = all matched"),
+        row(&l(A::Htb), "Hack The Box: machine, guided tasks + hints, flags"),
+        row(&l(A::Vars), "edit variables (split: this cmd / all)"),
+        row(&l(A::Favorite), "pin ★ favorite (shows ★/⏱ categories)"),
+        row(&j(&[A::Bg, A::Theme, A::ThemePicker]), &format!(
+            "background fx · theme / picker: {}",
             theme().name.chars().take(20).collect::<String>()
         )),
-        row("D / M", &format!(
-            "Discord presence {} · M cycles privacy: {}",
+        row(&j(&[A::Discord, A::DiscordPrivacy]), &format!(
+            "Discord presence {} · privacy: {}",
             if app.discord_rpc { "on" } else { "off" },
             app.discord_privacy.as_str()
         )),
-        row("/ · a / d", "fuzzy search all · add / delete a command"),
-        row("q / esc", "quit"),
+        row(&j(&[A::Search, A::Add, A::Delete]), "fuzzy search all · add / delete a command"),
+        row(&format!("{} / esc", l(A::Quit)), "quit (^c always works)"),
         Line::from(Span::styled(" run pane (⇥ into it)", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD))),
-        row("i / ⏎", "interact (type into it) · F12 detach"),
-        row("↑↓", "scroll · ←→ switch tab · g tail"),
-        row("z", "zoom the run tab fullscreen (bigger PTY)"),
-        row("K / d / r", "kill job / close tab / re-run (restored too)"),
+        row(&l(A::Interact), &format!("interact (type into it) · {} detach", k.compact(A::Detach))),
+        row(&k.pair(A::ScrollDown, A::ScrollUp), &format!(
+            "scroll · {} switch tab · {} tail",
+            k.pair(A::TabPrev, A::TabNext),
+            l(A::Tail)
+        )),
+        row(&l(A::Zoom), "zoom the run tab fullscreen (bigger PTY)"),
+        row(&j(&[A::Kill, A::Close, A::Rerun]), "kill job / close tab / re-run (restored too)"),
         Line::from(Span::styled(" ctf rooms + writeup", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD))),
-        row("c", "rooms: ⏎ use · n new · p thm/htb · s scope"),
-        row("L", "loot: creds · ⏎ load vars · c crack hash"),
-        row("g", "GTFOBins privesc lookup (offline)"),
-        row("w", "add a writeup note to the log"),
-        row("F / E", "capture flag → notes · export writeup (redacted)"),
-        row("S / o", &format!("room scope (⊙ allowed hosts, {}) · o notes", app.scope_mode.as_str())),
-        row("y / ^r", "history: ⏎ copy · x re-run · l log · / filter"),
+        row(&l(A::Rooms), "rooms: ⏎ use · n new · p thm/htb · s scope"),
+        row(&l(A::Loot), "loot: creds · ⏎ load vars · c crack hash"),
+        row(&l(A::Gtfobins), "GTFOBins privesc lookup (offline)"),
+        row(&l(A::Note), "add a writeup note to the log"),
+        row(&j(&[A::Flag, A::Export]), "capture flag → notes · export writeup (redacted)"),
+        row(&j(&[A::Scope, A::Notes]), &format!("room scope (⊙ allowed hosts, {}) · notes", app.scope_mode.as_str())),
+        row(&l(A::History), "history: ⏎ copy · x re-run · l log · / filter"),
         Line::from(Span::styled(
-            "  copies auto-log · run tabs come back on launch (--fresh)",
+            "  copies auto-log · tabs restore on launch (--fresh) · pivt keys",
             Style::default().fg(theme().dim),
         )),
     ];
