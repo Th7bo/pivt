@@ -50,6 +50,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::Flag => draw_flag(f, app),
         Mode::Gtfo => draw_gtfo(f, app),
         Mode::Recipes => draw_recipes(f, app),
+        Mode::Htb => draw_htb(f, app),
         _ => {}
     }
 
@@ -751,6 +752,8 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Mode::Flag => &[("⇥", "user/root"), ("type", "value"), ("⏎", "save+copy"), ("esc", "cancel")],
         Mode::Gtfo => &[("type", "filter binary"), ("↑↓", "move"), ("⏎", "copy"), ("esc", "close")],
         Mode::Recipes => &[("↑↓", "move"), ("⏎", "run recipe"), ("A", "run all matched"), ("esc", "close")],
+        Mode::Htb if app.htb_input.is_some() => &[("type", "answer"), ("⏎", "submit"), ("esc", "cancel")],
+        Mode::Htb => &[("↑↓", "task"), ("⏎", "answer"), ("h", "hint"), ("m", "machine"), ("s/t", "spawn/stop"), ("r", "refresh"), ("esc", "close")],
         Mode::Normal => &[
             ("↹", "pane"), ("⏎", "copy"), ("x", "run"), ("e", "vars"),
             ("c", "room"), ("L", "loot"), ("w", "note"), ("/", "find"), ("?", "help"),
@@ -1082,6 +1085,192 @@ fn draw_loot(f: &mut Frame, app: &App) {
         List::new(rows).highlight_style(Style::default().bg(SEL_BG)),
         inner,
         &mut state,
+    );
+}
+
+/// Render `code` spans (HTB task text uses markdown backticks) in flag colour.
+fn md_spans(text: &str, base: Style) -> Vec<Span<'static>> {
+    text.split('`')
+        .enumerate()
+        .filter(|(_, part)| !part.is_empty())
+        .map(|(i, part)| {
+            if i % 2 == 1 {
+                Span::styled(part.to_string(), Style::default().fg(SYN_FLAG))
+            } else {
+                Span::styled(part.to_string(), base)
+            }
+        })
+        .collect()
+}
+
+fn draw_htb(f: &mut Frame, app: &App) {
+    use crate::htb::TaskKind;
+    let area = centered(f.area(), 104, 28);
+    f.render_widget(Clear, area);
+    let st = app.htb.snapshot();
+    let status = match (&st.busy, &st.message) {
+        (Some(b), _) => Span::styled(format!(" ⟳ {b} "), Style::default().fg(ACCENT)),
+        (None, Some((true, m))) => Span::styled(format!(" {m} "), Style::default().fg(OK)),
+        (None, Some((false, m))) => Span::styled(format!(" ✗ {m} "), Style::default().fg(WARN)),
+        _ => Span::raw(""),
+    };
+    let htb_green = Color::Rgb(0x9f, 0xef, 0x00);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(htb_green))
+        .title(Span::styled(" hack the box ", Style::default().fg(htb_green).add_modifier(Modifier::BOLD)))
+        .title(Line::from(status).right_aligned())
+        .style(Style::default().bg(PANEL));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if !app.htb.has_token() {
+        let path = crate::htb::token_path();
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled("no HTB App Token yet.", Style::default().fg(FG).add_modifier(Modifier::BOLD))),
+                Line::from(""),
+                Line::from(Span::styled("1. app.hackthebox.com → avatar → Account Settings → App Tokens → Create", Style::default().fg(DIM))),
+                Line::from(Span::styled(format!("2. save it to {} (chmod 600), or export HTB_TOKEN", path.display()), Style::default().fg(DIM))),
+                Line::from(Span::styled("3. restart pivt and press H", Style::default().fg(DIM))),
+            ])
+            .wrap(Wrap { trim: true }),
+            inner.inner(Margin { horizontal: 1, vertical: 1 }),
+        );
+        return;
+    }
+
+    let rows = Layout::vertical([Constraint::Length(5), Constraint::Min(5), Constraint::Length(1)]).split(inner);
+
+    // ── header ──
+    let Some(m) = &st.machine else {
+        let hint = if st.busy.is_some() { "loading…" } else { "no machine loaded — press m and type a machine name" };
+        f.render_widget(Paragraph::new(Span::styled(hint, Style::default().fg(DIM))), rows[0].inner(Margin { horizontal: 1, vertical: 1 }));
+        draw_htb_input(f, app, rows[2]);
+        return;
+    };
+    let diff_col = match m.difficulty.as_str() {
+        "Easy" => OK,
+        "Medium" => SYN_NUM,
+        "Hard" => WARN,
+        _ => ACCENT2,
+    };
+    let tick = |b: bool| if b { ("✓", OK) } else { ("○", DIM) };
+    let (u, uc) = tick(m.user_owned);
+    let (r, rc) = tick(m.root_owned);
+    let mut head = vec![
+        Span::styled(format!(" {} ", m.name), Style::default().fg(FG).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{} · ", m.os), Style::default().fg(DIM)),
+        Span::styled(m.difficulty.clone(), Style::default().fg(diff_col)),
+        Span::styled(format!(" · {} pts{}   ", m.points, if m.retired { " · retired" } else { "" }), Style::default().fg(DIM)),
+    ];
+    match &m.ip {
+        Some(ip) => head.push(Span::styled(format!("◎ {ip}   "), Style::default().fg(SYN_NUM))),
+        None if m.spawned => head.push(Span::styled("◎ spawning…   ", Style::default().fg(ACCENT))),
+        None => head.push(Span::styled("◎ not spawned (s)   ", Style::default().fg(DIM))),
+    }
+    head.extend([
+        Span::styled(format!("user {u}  "), Style::default().fg(uc)),
+        Span::styled(format!("root {r}"), Style::default().fg(rc)),
+    ]);
+    if m.guided {
+        head.push(Span::styled("   guided", Style::default().fg(ACCENT2)));
+    }
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(head),
+            Line::from(Span::styled(format!(" {}", m.synopsis), Style::default().fg(Color::Rgb(0x8b, 0x98, 0xa5)))),
+        ])
+        .wrap(Wrap { trim: false }),
+        rows[0],
+    );
+
+    // ── tasks ──
+    let cols = Layout::horizontal([Constraint::Length(30), Constraint::Min(10)]).split(rows[1]);
+    let items: Vec<ListItem> = st
+        .tasks
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let sel = i == app.htb_idx;
+            let (icon, col) = if t.completed {
+                ("✓", OK)
+            } else if st.locked(t) {
+                ("·", DIM)
+            } else {
+                match t.kind {
+                    TaskKind::User => ("⚑", SYN_NUM),
+                    TaskKind::Root => ("⚑", WARN),
+                    TaskKind::Task => ("○", ACCENT),
+                }
+            };
+            let mark = if sel { Span::styled("▎", Style::default().fg(crate::anim::pulse(app.tick))) } else { Span::raw(" ") };
+            ListItem::new(Line::from(vec![
+                mark,
+                Span::styled(format!(" {icon} "), Style::default().fg(col)),
+                Span::styled(
+                    t.title.clone(),
+                    Style::default()
+                        .fg(if sel { FG } else if st.locked(t) { DIM } else { Color::Rgb(0xb0, 0xbc, 0xc9) })
+                        .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
+                ),
+            ]))
+        })
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(app.htb_idx.min(st.tasks.len().saturating_sub(1))));
+    f.render_stateful_widget(List::new(items).highlight_style(Style::default().bg(SEL_BG)), cols[0], &mut state);
+
+    if let Some(t) = st.tasks.get(app.htb_idx) {
+        let mut lines = vec![Line::from(Span::styled(t.title.clone(), Style::default().fg(FG).add_modifier(Modifier::BOLD)))];
+        if !t.question.is_empty() {
+            lines.push(Line::from(md_spans(&t.question, Style::default().fg(FG))));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("format  ", Style::default().fg(DIM)),
+            Span::styled(t.format.clone(), Style::default().fg(SYN_NUM)),
+        ]));
+        if t.completed {
+            lines.push(Line::from(Span::styled("✓ solved", Style::default().fg(OK))));
+        } else if st.locked(t) {
+            lines.push(Line::from(Span::styled("locked — solve the previous task first", Style::default().fg(DIM))));
+        }
+        if !t.hint.is_empty() {
+            lines.push(Line::from(""));
+            if app.htb_hint {
+                let mut l = vec![Span::styled("hint  ", Style::default().fg(ACCENT2))];
+                l.extend(md_spans(&t.hint, Style::default().fg(Color::Rgb(0x8b, 0x98, 0xa5))));
+                lines.push(Line::from(l));
+            } else {
+                lines.push(Line::from(Span::styled("h  reveal hint (free, no point cost)", Style::default().fg(DIM))));
+            }
+        }
+        f.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            cols[1].inner(Margin { horizontal: 1, vertical: 0 }),
+        );
+    }
+    draw_htb_input(f, app, rows[2]);
+}
+
+fn draw_htb_input(f: &mut Frame, app: &App, area: Rect) {
+    use crate::app::HtbInput;
+    let (label, buf) = match &app.htb_input {
+        Some(HtbInput::Machine(b)) => ("machine › ", b),
+        Some(HtbInput::Answer(b)) => ("answer › ", b),
+        None => return,
+    };
+    let cursor = if app.tick / 10 % 2 == 0 { "▌" } else { " " };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!(" {label}"), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(buf.clone(), Style::default().fg(FG)),
+            Span::styled(cursor, Style::default().fg(ACCENT)),
+        ]))
+        .style(Style::default().bg(SEL_BG)),
+        area,
     );
 }
 
@@ -1546,6 +1735,7 @@ fn draw_help(f: &mut Frame) {
         row("x", "run it live in the run pane (↓ tabs)"),
         row("P", "parse scan output → PORTS + ✸ suggested"),
         row("R", "recipes: run command bundles · A = all matched"),
+        row("H", "Hack The Box: machine, guided tasks + hints, submit"),
         row("e", "edit variables (split: this cmd / all)"),
         row("f", "pin ★ favorite (shows ★/⏱ categories)"),
         row("b", "toggle background: starfield ↔ flow field"),

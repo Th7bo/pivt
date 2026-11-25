@@ -41,6 +41,15 @@ pub enum Mode {
     Flag,
     Gtfo,
     Recipes,
+    Htb,
+}
+
+/// Text being typed inside the HTB panel.
+pub enum HtbInput {
+    /// Machine name or id to load.
+    Machine(String),
+    /// Answer / flag for the selected task.
+    Answer(String),
 }
 
 #[derive(Default)]
@@ -208,6 +217,13 @@ pub struct App {
     pub recipe_idx: usize,
     /// nmap service names from the last parsed scan (P), for recipe matching.
     pub scan_services: Vec<String>,
+    // hack the box (H)
+    pub htb: crate::htb::Htb,
+    pub htb_idx: usize,
+    pub htb_hint: bool,
+    pub htb_input: Option<HtbInput>,
+    /// Last IP HTB reported, so RHOST only follows HTB when HTB changes.
+    htb_last_ip: Option<String>,
     pub loot_form: LootForm,
 
     // favorites + recent (command keys "category/name")
@@ -351,6 +367,11 @@ impl App {
             recipes: crate::recipe::load_all(),
             recipe_idx: 0,
             scan_services: Vec::new(),
+            htb: crate::htb::Htb::new(),
+            htb_idx: 0,
+            htb_hint: false,
+            htb_input: None,
+            htb_last_ip: None,
             loot_form: LootForm::default(),
             favorites,
             recent,
@@ -400,6 +421,7 @@ impl App {
             r.resize(rows, cols);
         }
         self.poll_cracks();
+        self.poll_htb();
         // track RHOST changes: re-point the pinger and (re)start the box timer
         let rhost = self.vars.get("RHOST").cloned().unwrap_or_default();
         if rhost != self.last_rhost {
@@ -448,6 +470,16 @@ impl App {
         if let Some(cat) = self.current_category() {
             let (glyph, _) = crate::theme::category_style(cat);
             details.push(format!("{glyph} in {cat}"));
+        }
+        let htb = self.htb.snapshot();
+        if let Some(m) = &htb.machine {
+            let mut line = format!("HTB {} · {}", m.name, m.difficulty);
+            let guided: Vec<_> = htb.tasks.iter().filter(|t| t.kind == crate::htb::TaskKind::Task).collect();
+            if !guided.is_empty() {
+                let done = guided.iter().filter(|t| t.completed).count();
+                line.push_str(&format!(" · {done}/{} tasks", guided.len()));
+            }
+            details.push(line);
         }
 
         // bottom line candidates
@@ -1121,6 +1153,98 @@ impl App {
         self.run_tab = first_new;
         self.focus = Focus::Run;
         self.interacting = false;
+    }
+
+    // ── hack the box ──
+    pub fn open_htb(&mut self) {
+        self.mode = Mode::Htb;
+        self.htb_input = None;
+        if !self.htb.has_token() {
+            return; // panel explains how to add one
+        }
+        if self.htb.snapshot().machine.is_none() && !self.htb.is_busy() {
+            let room = self.active_room.as_ref().map(|r| r.name.clone());
+            self.htb.load(None, room);
+        }
+    }
+    pub fn htb_next(&mut self) {
+        let n = self.htb.snapshot().tasks.len();
+        if n > 0 {
+            self.htb_idx = (self.htb_idx + 1) % n;
+            self.htb_hint = false;
+        }
+    }
+    pub fn htb_prev(&mut self) {
+        let n = self.htb.snapshot().tasks.len();
+        if n > 0 {
+            self.htb_idx = (self.htb_idx + n - 1) % n;
+            self.htb_hint = false;
+        }
+    }
+    /// Start typing an answer for the selected task.
+    pub fn htb_answer_begin(&mut self) {
+        let st = self.htb.snapshot();
+        let Some(t) = st.tasks.get(self.htb_idx) else { return };
+        if t.completed {
+            self.set_status(format!("✓ {} already done", t.title));
+        } else if st.locked(t) {
+            self.set_status("🔒 finish the previous task first");
+        } else {
+            self.htb_input = Some(HtbInput::Answer(String::new()));
+        }
+    }
+    pub fn htb_input_submit(&mut self) {
+        match self.htb_input.take() {
+            Some(HtbInput::Machine(name)) if !name.trim().is_empty() => {
+                self.htb_idx = 0;
+                self.htb.load(Some(name.trim().to_string()), None);
+            }
+            Some(HtbInput::Answer(ans)) if !ans.trim().is_empty() => {
+                if let Some(t) = self.htb.snapshot().tasks.get(self.htb_idx).cloned() {
+                    self.htb.submit(t, ans.trim().to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    pub fn htb_input_buf(&mut self) -> Option<&mut String> {
+        match self.htb_input.as_mut()? {
+            HtbInput::Machine(b) | HtbInput::Answer(b) => Some(b),
+        }
+    }
+
+    /// React to HTB results: flag bursts + notes, task log lines, RHOST sync.
+    fn poll_htb(&mut self) {
+        let target = self.vars.get("RHOST").cloned().unwrap_or_default();
+        for ev in self.htb.take_events() {
+            match ev {
+                crate::htb::HtbEvent::Owned { which, value } => {
+                    writeup::set_flag(self.active_room.as_ref(), &target, which, &value);
+                    self.flags_captured += 1;
+                    self.burst_start = Some(self.tick);
+                    self.burst_label = format!("{} PWNED", which.to_uppercase());
+                    self.set_status(format!("🚩 HTB accepted the {which} flag"));
+                }
+                crate::htb::HtbEvent::TaskSolved { title, question, answer } => {
+                    if self.logging {
+                        let q = if question.is_empty() { String::new() } else { format!(" — {question}") };
+                        writeup::log_note(self.active_room.as_ref(), &target, &format!("🧩 {title}{q} → `{answer}`"));
+                    }
+                    self.set_status(format!("✓ {title} correct"));
+                }
+            }
+        }
+        // Follow the machine's IP into RHOST when HTB reports a new one.
+        let ip = self.htb.snapshot().machine.and_then(|m| m.ip);
+        if ip.is_some() && ip != self.htb_last_ip {
+            self.htb_last_ip = ip.clone();
+            let ip = ip.unwrap_or_default();
+            if self.vars.get("RHOST") != Some(&ip) {
+                self.vars.insert("RHOST".into(), ip.clone());
+                self.persist_config();
+                self.set_status(format!("◎ RHOST = {ip} (from HTB)"));
+            }
+        }
     }
 
     // ── recipes ──

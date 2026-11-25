@@ -4,6 +4,7 @@ mod clipboard;
 mod discord;
 mod gtfobins;
 mod hashid;
+mod htb;
 mod loot;
 mod model;
 mod netif;
@@ -162,6 +163,42 @@ fn snapshot(what: &str) {
             app.add.field = 3;
         }
         "help" => app.mode = Mode::Help,
+        s if s.starts_with("htb-live:") => {
+            // Real API, read-only: load a machine and render the panel.
+            app.htb.load(Some(s["htb-live:".len()..].to_string()), None);
+            let t0 = std::time::Instant::now();
+            while app.htb.is_busy() && t0.elapsed() < std::time::Duration::from_secs(30) {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            app.mode = Mode::Htb;
+        }
+        "htb" => {
+            use htb::*;
+            let t = |id, title: &str, q: &str, hint: &str, fmt: &str, done, kind, prereq| Task {
+                id, title: title.into(), question: q.into(), hint: hint.into(), format: fmt.into(),
+                completed: done, kind, prereq,
+            };
+            app.htb = Htb::with_state(HtbState {
+                machine: Some(Machine {
+                    id: 1, name: "Lame".into(), os: "Linux".into(), difficulty: "Easy".into(), points: 20,
+                    ip: Some("10.10.10.3".into()), synopsis: "Lame is an easy Linux machine, requiring only one exploit to obtain root access.".into(),
+                    user_owned: false, root_owned: false, guided: true, retired: true, spawned: true,
+                }),
+                tasks: vec![
+                    t(1, "Task 1", "How many of the `nmap` top 1000 TCP ports are open on the remote host?", "Run a `nmap` scan on the target.", "number, such as 3, 17, or 4567", true, TaskKind::Task, None),
+                    t(2, "Task 2", "What version of VSFTPd is running on Lame?", "The -sV flag tells nmap to fingerprint versions.", "*.*.*", false, TaskKind::Task, Some(1)),
+                    t(3, "Task 3", "There is a famous backdoor in VSFTPd version 2.3.4, and a Metasploit module to exploit it. Does that exploit work here?", "", "yes or no", false, TaskKind::Task, Some(2)),
+                    t(4, "Submit User Flag", "", "", "32 hex characters", false, TaskKind::User, None),
+                    t(5, "Submit Root Flag", "", "", "32 hex characters", false, TaskKind::Root, None),
+                ],
+                busy: None,
+                message: Some((true, "loaded Lame".into())),
+                events: vec![],
+            });
+            app.mode = Mode::Htb;
+            app.htb_idx = 1;
+            app.htb_hint = true;
+        }
         "recipes" => {
             app.vars.insert("PORTS".into(), "22,80,139,445".into());
             app.scan_services = vec!["ssh".into(), "http".into(), "microsoft-ds".into()];
@@ -323,6 +360,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Flag => flag_keys(app, key),
         Mode::Gtfo => gtfo_keys(app, key),
         Mode::Recipes => recipe_keys(app, key),
+        Mode::Htb => htb_keys(app, key),
     }
 }
 
@@ -347,6 +385,46 @@ fn flag_keys(app: &mut App, key: KeyEvent) {
             app.flag_buf.pop();
         }
         KeyCode::Char(c) => app.flag_buf.push(c),
+        _ => {}
+    }
+}
+
+fn htb_keys(app: &mut App, key: KeyEvent) {
+    if app.htb_input.is_some() {
+        match key.code {
+            KeyCode::Esc => app.htb_input = None,
+            KeyCode::Enter => app.htb_input_submit(),
+            KeyCode::Backspace => {
+                if let Some(b) = app.htb_input_buf() {
+                    b.pop();
+                }
+            }
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {}
+            KeyCode::Char(c) => {
+                if let Some(b) = app.htb_input_buf() {
+                    b.push(c);
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.mode = Mode::Normal,
+        KeyCode::Down | KeyCode::Char('j') => app.htb_next(),
+        KeyCode::Up | KeyCode::Char('k') => app.htb_prev(),
+        KeyCode::Enter => app.htb_answer_begin(),
+        KeyCode::Char('h') => app.htb_hint = !app.htb_hint,
+        KeyCode::Char('m') => app.htb_input = Some(app::HtbInput::Machine(String::new())),
+        KeyCode::Char('r') => {
+            app.htb.refresh();
+        }
+        KeyCode::Char('s') => {
+            app.htb.spawn_machine();
+        }
+        KeyCode::Char('t') => {
+            app.htb.stop_machine();
+        }
         _ => {}
     }
 }
@@ -523,6 +601,7 @@ fn normal_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Char('g') => app.open_gtfo(),
         KeyCode::Char('P') => app.parse_scan(),
         KeyCode::Char('R') => app.open_recipes(),
+        KeyCode::Char('H') => app.open_htb(),
         KeyCode::Char('F') => app.flag_open(),
         KeyCode::Char('E') => app.export_writeup(),
         _ => {}

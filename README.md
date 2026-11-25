@@ -38,6 +38,28 @@ Run `pivt`, press `?` for keybinds. Add your own commands in
 Screenshots are rendered headlessly:
 `PIVT_SNAP_ANSI=1 pivt snap normal > s.txt && python3 scripts/ansi2png.py s.txt s.png`.
 
+## Hack The Box (`H`)
+
+Pulls the box straight from HTB Labs: name, OS, difficulty, IP, synopsis and
+your user/root status, plus **Guided Mode** tasks with their questions,
+answer format and hints (hidden until you press `h`; hints don't cost points).
+
+- `⏎` answer the selected task or submit a user/root flag. Accepted flags fire
+  the PWNED burst and go into the room's notes, like `F`. Solved guided
+  answers are logged to the writeup.
+- `m` load a machine by name; otherwise pivt loads your active machine (or the
+  active room's name).
+- `s` / `t` spawn / stop the machine. Once it has an IP, `RHOST` follows it.
+- `r` refresh. The Discord presence shows `HTB <box> · <difficulty> · n/m tasks`.
+
+Setup: Labs → avatar → Account Settings → **App Tokens** → create one, then
+
+```sh
+printf '%s' 'TOKEN' > ~/.config/pivt/htb_token && chmod 600 ~/.config/pivt/htb_token
+```
+
+(or export `HTB_TOKEN`). pivt uses the same endpoints as the HTB web app.
+
 ## Recipes (`R`)
 
 Bundles of commands that run together, one run tab each. After a scan, press
