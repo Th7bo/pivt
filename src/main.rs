@@ -19,7 +19,8 @@ mod writeup;
 use app::{App, Focus, Mode};
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+        EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
         KeyModifiers, MouseEventKind,
     },
     execute,
@@ -35,6 +36,7 @@ fn main() -> io::Result<()> {
         snapshot(&args[2]);
         return Ok(());
     }
+    install_panic_hook();
     let mut terminal = setup()?;
     let mut app = App::new();
     let res = run(&mut terminal, &mut app);
@@ -248,10 +250,10 @@ fn edit_in_external(
 ) -> io::Result<()> {
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".into());
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), DisableBracketedPaste, LeaveAlternateScreen)?;
     let status = std::process::Command::new(&editor).arg(path).status();
     enable_raw_mode()?;
-    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen, EnableBracketedPaste)?;
     terminal.clear()?;
     if status.is_err() {
         // best-effort; the next draw shows a message if needed
@@ -262,16 +264,40 @@ fn edit_in_external(
 fn setup() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    // Bracketed paste: a paste arrives as one Event::Paste instead of a burst of
+    // KeyEvents (where every newline would be Enter and letters shortcuts).
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     Terminal::new(backend)
 }
 
 fn restore(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        DisableBracketedPaste
+    )?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+/// On panic, put the terminal back (raw mode off, alt screen, mouse, paste)
+/// before the default hook prints the message, so the shell isn't left broken.
+fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            crossterm::cursor::Show
+        );
+        default(info);
+    }));
 }
 
 fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::Result<()> {
@@ -301,6 +327,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::
         if event::poll(timeout)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(app, key),
+                Event::Paste(text) => handle_paste(app, &text),
                 Event::Mouse(me) => match me.kind {
                     // wheel scrolls the run pane — works even while interacting
                     MouseEventKind::ScrollUp => app.run_scroll_up(3),
@@ -362,6 +389,99 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Recipes => recipe_keys(app, key),
         Mode::Htb => htb_keys(app, key),
     }
+}
+
+/// Route a bracketed paste to whatever is taking text input right now. Never
+/// replays it as keystrokes: with no text field active the paste is dropped.
+fn handle_paste(app: &mut App, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    // interacting with a job: hand the paste to the program in the PTY
+    if app.mode == Mode::Normal && app.focus == Focus::Run && app.interacting {
+        let bracketed = app
+            .runs
+            .get(app.run_tab)
+            .and_then(|j| j.parser().map(|p| p.screen().bracketed_paste()))
+            .unwrap_or(false);
+        app.run_input(&pty_paste_bytes(text, bracketed));
+        return;
+    }
+    // every in-app text field is single-line
+    let line = single_line(text);
+    if line.is_empty() {
+        return;
+    }
+    match app.mode {
+        Mode::Normal => {
+            if app.inline_edit.is_some() {
+                line.chars().for_each(|c| app.inline_push(c));
+            }
+            // otherwise: no text field, ignore
+        }
+        Mode::Search => line.chars().for_each(|c| app.search_push(c)),
+        Mode::Vars => {
+            if let Some(s) = app.var_new_key.as_mut() {
+                s.push_str(&line);
+            } else if app.var_editing {
+                app.var_buf.push_str(&line);
+            }
+        }
+        Mode::Add => app.add.buf_mut().push_str(&line),
+        Mode::AddLoot => app.loot_form.buf_mut().push_str(&line),
+        Mode::NewRoom => app.new_room.buf_mut().push_str(&line),
+        Mode::Note => app.note_buf.push_str(&line),
+        Mode::Flag => app.flag_buf.push_str(&line),
+        Mode::Gtfo => line.chars().for_each(|c| app.gtfo_push(c)),
+        Mode::Htb => {
+            if let Some(b) = app.htb_input_buf() {
+                b.push_str(&line);
+            }
+        }
+        Mode::Splash | Mode::Help | Mode::Rooms | Mode::Loot | Mode::Recipes => {}
+    }
+}
+
+/// Flatten a paste for a single-line field: trailing line breaks dropped,
+/// inner line breaks and tabs become spaces, other control chars removed.
+fn single_line(text: &str) -> String {
+    let text = text.trim_end_matches(['\r', '\n']);
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push(' ');
+            }
+            '\n' | '\t' => out.push(' '),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Bytes for a paste into a PTY program, as a terminal would send them: line
+/// breaks become CR, and if the program enabled bracketed paste (mode 2004)
+/// the text is wrapped in the 200~/201~ markers. Any end marker inside the
+/// paste is stripped so pasted text can't break out of the bracket.
+fn pty_paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    let body = text
+        .replace("\x1b[201~", "")
+        .replace("\r\n", "\r")
+        .replace('\n', "\r");
+    let mut out = Vec::with_capacity(body.len() + 12);
+    if bracketed {
+        out.extend_from_slice(b"\x1b[200~");
+    }
+    out.extend_from_slice(body.as_bytes());
+    if bracketed {
+        out.extend_from_slice(b"\x1b[201~");
+    }
+    out
 }
 
 fn gtfo_keys(app: &mut App, key: KeyEvent) {
@@ -785,5 +905,29 @@ fn add_keys(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char(c) => app.add.buf_mut().push(c),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_line_flattens_paste() {
+        assert_eq!(single_line("10.10.10.3\n"), "10.10.10.3");
+        assert_eq!(single_line("a\r\nb\nc\rd\te"), "a b c d e");
+        assert_eq!(single_line("x\x1b[0my\r\n\r\n"), "x[0my");
+        assert_eq!(single_line("\n\n"), "");
+    }
+
+    #[test]
+    fn pty_paste_normalizes_and_brackets() {
+        assert_eq!(pty_paste_bytes("ls\r\nid\n", false), b"ls\rid\r".to_vec());
+        assert_eq!(pty_paste_bytes("a\nb", true), b"\x1b[200~a\rb\x1b[201~".to_vec());
+        // an embedded end marker can't escape the bracket
+        assert_eq!(
+            pty_paste_bytes("x\x1b[201~rm -rf ~\n", true),
+            b"\x1b[200~xrm -rf ~\r\x1b[201~".to_vec()
+        );
     }
 }
