@@ -39,6 +39,42 @@ Screenshots are rendered headlessly:
 `PIVT_SNAP_ANSI=1 pivt snap normal > s.txt && python3 scripts/ansi2png.py s.txt s.png`.
 `snap` never reads or writes the saved session.
 
+## Rooms and shell integration
+
+A room is a directory with a `.ctfroom` marker, holding `nmap/ loot/
+exploits/`, `notes.md`, the command log and job logs. `c` lists and activates
+rooms, `n` scaffolds one. Starting pivt inside a room activates it.
+
+Where rooms live, first match wins:
+
+1. `$CTF_ROOT`
+2. `rooms_dir` in `~/.config/pivt/config.toml` (`~` is expanded)
+3. `~/TryHackMe`, if that directory already exists (the old default)
+4. `$XDG_DATA_HOME/pivt/rooms` (`~/.local/share/pivt/rooms`)
+
+Other settings in `config.toml`:
+
+```toml
+# copied into every new room (unset: ~/.config/zsh/ctf-cheatsheet.md if it
+# exists, as CHEATSHEET.md; "" = copy nothing)
+room_template = "~/notes/room-template.md"
+
+# mirror RHOST into a file whenever it changes, and read it at startup when
+# no room target is set (unset: ~/.cache/ctf-target, only if that file
+# already exists; "" = off)
+sync_target_file = "~/.cache/ctf-target"
+```
+
+`sync_target_file` is a hook for shell functions: the file holds the bare
+target IP plus a newline, so a shell can share pivt's target, e.g.
+
+```sh
+target() { [ -n "$1" ] && echo "$1" > ~/.cache/ctf-target; cat ~/.cache/ctf-target; }
+export TARGET=$(cat ~/.cache/ctf-target 2>/dev/null)
+```
+
+Each room also gets a `.target` file (`<ip> [host]`) with the same contents.
+
 ## Sessions
 
 Close pivt and reopen it tomorrow: the workspace comes back. That covers the

@@ -12,16 +12,6 @@ pub fn now(fmt: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Root holding all rooms: $CTF_ROOT or ~/TryHackMe (matches the shell kit).
-pub fn ctf_root() -> PathBuf {
-    if let Some(r) = std::env::var_os("CTF_ROOT") {
-        return PathBuf::from(r);
-    }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("TryHackMe")
-}
-
 #[derive(Debug, Clone)]
 pub struct Room {
     pub name: String,
@@ -62,11 +52,10 @@ impl Room {
     }
 }
 
-/// All rooms (dirs under CTF_ROOT marked with .ctfroom), newest first.
-pub fn list_rooms() -> Vec<Room> {
-    let root = ctf_root();
+/// All rooms (dirs under `root` marked with .ctfroom), newest first.
+pub fn list_rooms(root: &Path) -> Vec<Room> {
     let mut rooms: Vec<(std::time::SystemTime, Room)> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(&root) {
+    if let Ok(rd) = std::fs::read_dir(root) {
         for e in rd.flatten() {
             let p = e.path();
             if p.join(".ctfroom").exists() {
@@ -101,20 +90,21 @@ pub fn find_room_cwd() -> Option<Room> {
     std::env::current_dir().ok().and_then(|d| find_room(&d))
 }
 
-/// Scaffold a new room (dirs + notes.md + cheatsheet copy), like `ctf new`.
-pub fn scaffold(name: &str, ip: &str, host: &str) -> std::io::Result<Room> {
-    let dir = ctf_root().join(name);
+/// Scaffold a new room under `root` (dirs + notes.md + optional template
+/// copy), like `ctf new`.
+pub fn scaffold(root: &Path, template: Option<&Path>, name: &str, ip: &str, host: &str) -> std::io::Result<Room> {
+    if !root.exists() {
+        // a fresh rooms dir will hold loot and notes: owner-only
+        crate::model::create_private_dir(root)?;
+    }
+    let dir = root.join(name);
     for sub in ["nmap", "loot", "exploits"] {
         std::fs::create_dir_all(dir.join(sub))?;
     }
     std::fs::write(dir.join(".ctfroom"), "")?;
 
-    // copy the user's cheatsheet if it exists
-    if let Some(home) = dirs::home_dir() {
-        let sheet = home.join(".config/zsh/ctf-cheatsheet.md");
-        if sheet.exists() {
-            let _ = std::fs::copy(&sheet, dir.join("CHEATSHEET.md"));
-        }
+    if let Some(t) = template.filter(|t| t.is_file()) {
+        let _ = std::fs::copy(t, dir.join(template_dest(t)));
     }
 
     let notes = dir.join("notes.md");
@@ -139,4 +129,38 @@ pub fn scaffold(name: &str, ip: &str, host: &str) -> std::io::Result<Room> {
         room.write_target(ip, host);
     }
     Ok(room)
+}
+
+/// File name a template gets inside the room: the legacy zsh cheatsheet keeps
+/// its old `CHEATSHEET.md` name, anything else keeps its own.
+fn template_dest(t: &Path) -> String {
+    match t.file_name().and_then(|n| n.to_str()) {
+        Some("ctf-cheatsheet.md") | None => "CHEATSHEET.md".to_string(),
+        Some(n) => n.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scaffold_copies_template_only_when_given() {
+        let base = std::env::temp_dir().join(format!("pivt-scaffold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("rooms");
+        let tpl = base.join("my-notes.md");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(&tpl, "# tpl").unwrap();
+        let a = scaffold(&root, None, "a", "", "").unwrap();
+        assert!(a.path.join(".ctfroom").exists() && a.notes_file().exists());
+        assert_eq!(std::fs::read_dir(&a.path).unwrap().count(), 5, "nmap loot exploits .ctfroom notes.md only");
+        let b = scaffold(&root, Some(&tpl), "b", "10.0.0.2", "b.htb").unwrap();
+        assert_eq!(std::fs::read_to_string(b.path.join("my-notes.md")).unwrap(), "# tpl");
+        assert_eq!(b.read_target(), Some(("10.0.0.2".into(), Some("b.htb".into()))));
+        assert_eq!(template_dest(Path::new("/x/ctf-cheatsheet.md")), "CHEATSHEET.md");
+        let names: Vec<_> = list_rooms(&root).into_iter().map(|r| r.name).collect();
+        assert!(names.contains(&"a".to_string()) && names.contains(&"b".to_string()));
+        std::fs::remove_dir_all(&base).ok();
+    }
 }

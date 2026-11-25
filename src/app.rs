@@ -297,6 +297,11 @@ pub struct App {
     pub discord_link: String,
     last_rpc_tick: u64,
 
+    /// Rooms dir / template / target mirror, resolved from config + env.
+    pub paths: Paths,
+    /// The path settings as written in config.toml, saved back unchanged.
+    path_cfg: (String, Option<String>, Option<String>),
+
     // persistent workspace session (src/session.rs); off for `pivt snap`
     pub session_on: bool,
     /// Dir the session was last written to (changes with the active room).
@@ -325,6 +330,7 @@ impl App {
     pub fn for_tests() -> Self {
         let mut a = Self::build(crate::model::load_bundled_for_tests(), Config::default(), false);
         a.logging = false;
+        a.paths.target_file = None; // never touch the real shell target file
         a
     }
 
@@ -333,6 +339,8 @@ impl App {
         let favorites = cfg.favorites.clone();
         let recent = cfg.recent.clone();
         let flow_bg = cfg.flow_bg;
+        let paths = Paths::from_config(&cfg);
+        let path_cfg = (cfg.rooms_dir.clone(), cfg.room_template.clone(), cfg.sync_target_file.clone());
         let discord_rpc = cfg.discord_rpc;
         let discord_app_id = if cfg.discord_app_id.trim().is_empty() {
             crate::model::DEFAULT_DISCORD_APP_ID.to_string()
@@ -387,7 +395,7 @@ impl App {
             vars.insert("LPORT".into(), "4444".into());
         }
 
-        // ctf room + shared target: room .target > ~/.cache/ctf-target > config
+        // ctf room + shared target: room .target > sync_target_file > config
         let active_room = room::find_room_cwd();
         if let Some(r) = &active_room {
             if let Some((ip, host)) = r.read_target() {
@@ -398,7 +406,7 @@ impl App {
             }
         }
         if vars.get("RHOST").map(|s| s.is_empty()).unwrap_or(true) {
-            if let Some(ip) = read_ctf_target() {
+            if let Some(ip) = paths.target_file.as_deref().and_then(read_ctf_target) {
                 vars.insert("RHOST".into(), ip);
             }
         }
@@ -481,6 +489,8 @@ impl App {
             discord_app_id,
             discord_link: cfg.discord_link.clone(),
             last_rpc_tick: 0,
+            paths,
+            path_cfg,
             session_on: false,
             session_dir: None,
             session_sig: String::new(),
@@ -920,12 +930,17 @@ impl App {
             discord_rpc: self.discord_rpc,
             discord_app_id: self.discord_app_id.clone(),
             discord_link: self.discord_link.clone(),
+            rooms_dir: self.path_cfg.0.clone(),
+            room_template: self.path_cfg.1.clone(),
+            sync_target_file: self.path_cfg.2.clone(),
         };
         let _ = save_config(&cfg);
-        // keep the shell kit's target file + room .target in sync with RHOST
+        // keep the shell target file (if enabled) + room .target in sync with RHOST
         if let Some(rhost) = self.vars.get("RHOST") {
             if !rhost.is_empty() {
-                write_ctf_target(rhost);
+                if let Some(t) = &self.paths.target_file {
+                    write_ctf_target(t, rhost);
+                }
                 if let Some(r) = &self.active_room {
                     let host = self.vars.get("DOMAIN").cloned().unwrap_or_default();
                     r.write_target(rhost, &host);
@@ -1112,7 +1127,7 @@ impl App {
 
     // ── rooms ──
     pub fn open_rooms(&mut self) {
-        self.rooms = room::list_rooms();
+        self.rooms = room::list_rooms(&self.paths.rooms_dir);
         self.room_idx = self
             .active_room
             .as_ref()
@@ -1179,7 +1194,7 @@ impl App {
         }
         let ip = self.new_room.ip.trim().to_string();
         let host = self.new_room.host.trim().to_string();
-        match room::scaffold(name, &ip, &host) {
+        match room::scaffold(&self.paths.rooms_dir, self.paths.room_template.as_deref(), name, &ip, &host) {
             Ok(r) => {
                 self.leave_room_session();
                 self.active_room = Some(r.clone());

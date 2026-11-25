@@ -1452,7 +1452,7 @@ fn draw_rooms(f: &mut Frame, app: &App) {
         .border_style(Style::default().fg(ACCENT2))
         .title(Span::styled(" ctf rooms ", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD)))
         .title(Line::from(Span::styled(
-            format!(" {} ", crate::room::ctf_root().display()),
+            format!(" {} ", app.paths.rooms_dir.display()),
             Style::default().fg(DIM),
         )).right_aligned())
         .style(Style::default().bg(PANEL));
@@ -1468,7 +1468,7 @@ fn draw_rooms(f: &mut Frame, app: &App) {
                     Span::styled("press ", Style::default().fg(DIM)),
                     Span::styled("n", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
                     Span::styled(" to scaffold one under ", Style::default().fg(DIM)),
-                    Span::styled(crate::room::ctf_root().display().to_string(), Style::default().fg(FG)),
+                    Span::styled(app.paths.rooms_dir.display().to_string(), Style::default().fg(FG)),
                 ]),
             ])
             .wrap(Wrap { trim: true }),
@@ -1568,7 +1568,7 @@ fn draw_newroom(f: &mut Frame, app: &App) {
     draw_field(f, rows[2], "hostname (optional)", &app.new_room.host, app.new_room.field == 2);
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!("scaffolds {}/<name> with nmap/ loot/ exploits/ + notes.md", crate::room::ctf_root().display()),
+            format!("scaffolds {}/<name> with nmap/ loot/ exploits/ + notes.md", app.paths.rooms_dir.display()),
             Style::default().fg(ACCENT),
         ))
         .wrap(Wrap { trim: true }),
@@ -1824,7 +1824,7 @@ fn draw_help(f: &mut Frame) {
         row("F / E", "capture flag → notes · export writeup.md"),
         row("o", "open active room's notes in $EDITOR"),
         Line::from(Span::styled(
-            "  copies auto-log to the room · RHOST syncs with `target`.",
+            "  copies auto-log to the room · RHOST → sync_target_file (if set).",
             Style::default().fg(DIM),
         )),
         Line::from(Span::styled(

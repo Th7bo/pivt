@@ -121,6 +121,18 @@ pub struct Config {
     /// URL for the "get pivt" presence button; empty = [`REPO_URL`].
     #[serde(default)]
     pub discord_link: String,
+    /// Where rooms live; empty = $CTF_ROOT, else ~/TryHackMe if it exists,
+    /// else $XDG_DATA_HOME/pivt/rooms. `$CTF_ROOT` beats this setting.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rooms_dir: String,
+    /// File copied into every new room. Unset = the legacy
+    /// ~/.config/zsh/ctf-cheatsheet.md when it exists; "" = copy nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_template: Option<String>,
+    /// File RHOST is mirrored into for shell integrations. Unset =
+    /// ~/.cache/ctf-target, but only if that file already exists; "" = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_target_file: Option<String>,
     #[serde(default)]
     pub vars: BTreeMap<String, String>,
 }
@@ -183,19 +195,97 @@ pub fn user_commands_file() -> PathBuf {
     config_dir().join("commands.toml")
 }
 
-/// The shared target file used by the user's `target` shell function
-/// (~/.cache/ctf-target, honoring XDG_CACHE_HOME).
-pub fn ctf_target_file() -> PathBuf {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".cache")
-        });
-    base.join("ctf-target")
+/// `~` / `~/…` → under `home`; anything else as given.
+pub fn expand_home(s: &str, home: &Path) -> PathBuf {
+    if s == "~" {
+        home.to_path_buf()
+    } else if let Some(rest) = s.strip_prefix("~/") {
+        home.join(rest)
+    } else {
+        PathBuf::from(s)
+    }
 }
 
-pub fn read_ctf_target() -> Option<String> {
-    let s = std::fs::read_to_string(ctf_target_file()).ok()?;
+/// Filesystem locations that depend on config + environment, resolved once
+/// at startup.
+#[derive(Debug, Clone)]
+pub struct Paths {
+    /// Holds every room (`<rooms_dir>/<name>/.ctfroom`).
+    pub rooms_dir: PathBuf,
+    /// Copied into new rooms, if any.
+    pub room_template: Option<PathBuf>,
+    /// RHOST mirror for shell functions, if enabled.
+    pub target_file: Option<PathBuf>,
+}
+
+impl Paths {
+    pub fn from_config(cfg: &Config) -> Paths {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let data = dirs::data_dir().unwrap_or_else(|| home.join(".local/share"));
+        let env_root = std::env::var_os("CTF_ROOT");
+        Paths {
+            rooms_dir: resolve_rooms_dir(env_root.as_deref(), &cfg.rooms_dir, &home, &data),
+            room_template: resolve_room_template(cfg.room_template.as_deref(), &home),
+            target_file: resolve_target_file(cfg.sync_target_file.as_deref(), &home, &default_target_file(&home)),
+        }
+    }
+}
+
+/// Rooms dir: `$CTF_ROOT`, else config `rooms_dir`, else `~/TryHackMe` when
+/// that directory already exists (pre-config installs), else
+/// `<data_dir>/pivt/rooms`.
+pub fn resolve_rooms_dir(env: Option<&std::ffi::OsStr>, cfg: &str, home: &Path, data_dir: &Path) -> PathBuf {
+    if let Some(e) = env.filter(|e| !e.is_empty()) {
+        return PathBuf::from(e);
+    }
+    if !cfg.trim().is_empty() {
+        return expand_home(cfg.trim(), home);
+    }
+    let legacy = home.join("TryHackMe");
+    if legacy.is_dir() {
+        return legacy;
+    }
+    data_dir.join("pivt").join("rooms")
+}
+
+/// The pre-config default template (the author's zsh kit cheatsheet).
+pub fn legacy_room_template(home: &Path) -> PathBuf {
+    home.join(".config/zsh/ctf-cheatsheet.md")
+}
+
+/// Template copied into new rooms: the configured file, nothing for "", or
+/// the legacy cheatsheet only when it exists.
+pub fn resolve_room_template(cfg: Option<&str>, home: &Path) -> Option<PathBuf> {
+    match cfg.map(str::trim) {
+        Some("") => None,
+        Some(p) => Some(expand_home(p, home)),
+        None => Some(legacy_room_template(home)).filter(|p| p.is_file()),
+    }
+}
+
+/// ~/.cache/ctf-target (honoring XDG_CACHE_HOME): the file the author's zsh
+/// `target` function reads.
+pub fn default_target_file(home: &Path) -> PathBuf {
+    std::env::var_os("XDG_CACHE_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".cache"))
+        .join("ctf-target")
+}
+
+/// RHOST mirror: the configured path, off for "", or `default` only when it
+/// already exists (so existing shell setups keep working and new installs
+/// don't grow a stray cache file).
+pub fn resolve_target_file(cfg: Option<&str>, home: &Path, default: &Path) -> Option<PathBuf> {
+    match cfg.map(str::trim) {
+        Some("") => None,
+        Some(p) => Some(expand_home(p, home)),
+        None => Some(default.to_path_buf()).filter(|p| p.exists()),
+    }
+}
+
+pub fn read_ctf_target(path: &Path) -> Option<String> {
+    let s = std::fs::read_to_string(path).ok()?;
     let s = s.trim().to_string();
     if s.is_empty() {
         None
@@ -205,11 +295,10 @@ pub fn read_ctf_target() -> Option<String> {
 }
 
 /// Mirror RHOST into the shared target file so `target`/$TARGET see it too.
-pub fn write_ctf_target(ip: &str) {
+pub fn write_ctf_target(path: &Path, ip: &str) {
     if ip.is_empty() {
         return;
     }
-    let path = ctf_target_file();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -731,5 +820,77 @@ raw_pty = true
         let c = parse_commands(BUNDLED, false);
         assert!(c.len() > 40);
         assert!(c.iter().all(|x| !x.template.is_empty()));
+    }
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("pivt-paths-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn rooms_dir_precedence() {
+        let home = tmp("rooms");
+        let data = home.join(".local/share");
+        let env = std::ffi::OsStr::new("/srv/ctf");
+        // $CTF_ROOT wins over everything
+        assert_eq!(resolve_rooms_dir(Some(env), "~/x", &home, &data), PathBuf::from("/srv/ctf"));
+        // empty env counts as unset; config next, with ~ expanded
+        let empty = std::ffi::OsStr::new("");
+        assert_eq!(resolve_rooms_dir(Some(empty), "~/boxes", &home, &data), home.join("boxes"));
+        // nothing set, no legacy dir: XDG data dir
+        assert_eq!(resolve_rooms_dir(None, "", &home, &data), data.join("pivt/rooms"));
+        // legacy ~/TryHackMe is kept once it exists
+        std::fs::create_dir_all(home.join("TryHackMe")).unwrap();
+        assert_eq!(resolve_rooms_dir(None, "", &home, &data), home.join("TryHackMe"));
+        assert_eq!(resolve_rooms_dir(None, "/abs", &home, &data), PathBuf::from("/abs"));
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn room_template_only_when_configured_or_legacy_exists() {
+        let home = tmp("tpl");
+        assert_eq!(resolve_room_template(None, &home), None, "new user: copy nothing");
+        assert_eq!(resolve_room_template(Some("~/t.md"), &home), Some(home.join("t.md")));
+        let legacy = legacy_room_template(&home);
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "x").unwrap();
+        assert_eq!(resolve_room_template(None, &home), Some(legacy));
+        assert_eq!(resolve_room_template(Some(""), &home), None, "\"\" disables the legacy copy");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn target_sync_only_when_configured_or_file_exists() {
+        let home = tmp("tgt");
+        let def = home.join(".cache/ctf-target");
+        assert_eq!(resolve_target_file(None, &home, &def), None, "new user: off");
+        assert_eq!(resolve_target_file(Some("~/t"), &home, &def), Some(home.join("t")));
+        std::fs::create_dir_all(def.parent().unwrap()).unwrap();
+        std::fs::write(&def, "10.10.10.3\n").unwrap();
+        assert_eq!(resolve_target_file(None, &home, &def), Some(def.clone()), "existing setup kept");
+        assert_eq!(resolve_target_file(Some(" "), &home, &def), None, "explicitly off");
+        assert_eq!(read_ctf_target(&def).as_deref(), Some("10.10.10.3"));
+        write_ctf_target(&def, "10.10.10.4");
+        assert_eq!(read_ctf_target(&def).as_deref(), Some("10.10.10.4"));
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn path_settings_roundtrip_without_adding_keys() {
+        // unset Option settings must stay unset (absent) after a save
+        let txt = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(!txt.contains("room_template") && !txt.contains("sync_target_file") && !txt.contains("rooms_dir"), "{txt}");
+        let mut c = Config::default();
+        c.vars.insert("RHOST".into(), "1.2.3.4".into());
+        c.sync_target_file = Some(String::new());
+        c.room_template = Some("~/tpl.md".into());
+        c.rooms_dir = "~/rooms".into();
+        let back: Config = toml::from_str(&toml::to_string_pretty(&c).unwrap()).unwrap();
+        assert_eq!(back.sync_target_file.as_deref(), Some(""));
+        assert_eq!(back.room_template.as_deref(), Some("~/tpl.md"));
+        assert_eq!(back.rooms_dir, "~/rooms");
+        assert_eq!(back.vars.get("RHOST").map(String::as_str), Some("1.2.3.4"));
     }
 }
