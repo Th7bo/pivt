@@ -139,6 +139,8 @@ const RECENT_MAX: usize = 25;
 /// Ticks between session change checks (~2s) and forced output saves (~30s).
 const SESSION_CHECK_TICKS: u64 = 40;
 const SESSION_FULL_TICKS: u64 = 600;
+/// Ticks between checks that LHOST is still a local address (~10s).
+const LHOST_CHECK_TICKS: u64 = 200;
 
 /// A hashcat run started from the loot view, waiting for its tab to exit.
 pub struct PendingCrack {
@@ -255,6 +257,10 @@ pub struct App {
 
     // live target status
     pinger: Pinger,
+    /// LHOST isn't assigned to any local interface (header shows a warning).
+    pub lhost_stale: bool,
+    /// Re-check `lhost_stale` periodically (off for snapshots/tests).
+    lhost_watch: bool,
     pub box_started: Option<Instant>,
     /// Unix epoch of the box start (mirrors box_started for Discord timestamps).
     box_epoch: Option<i64>,
@@ -329,9 +335,32 @@ impl App {
                 vars.entry(ph).or_default();
             }
         }
-        if vars.get("LHOST").map(|s| s.is_empty()).unwrap_or(true) {
-            if let Some(ip) = netif::detect_lhost() {
+        // LHOST: fill when empty; follow a new VPN lease when the saved IP is
+        // gone from every interface; never override a choice that's still live
+        let ifaces = netif::list_ifaces();
+        let saved = vars.get("LHOST").cloned().unwrap_or_default();
+        let mut lhost_note = None;
+        let mut lhost_changed = false;
+        match netif::check_lhost(&saved, &ifaces) {
+            netif::LhostCheck::Fill(_, ip) => {
                 vars.insert("LHOST".into(), ip);
+            }
+            netif::LhostCheck::Replace(iface, ip) => {
+                lhost_note = Some(format!("⇡ LHOST {saved} is gone — now {ip} ({iface})"));
+                vars.insert("LHOST".into(), ip);
+                lhost_changed = true;
+            }
+            netif::LhostCheck::Stale => {
+                lhost_note = Some(format!("⚠ LHOST {saved} isn't on any interface — VPN down? (e → r re-detects)"));
+            }
+            netif::LhostCheck::Keep => {}
+        }
+        let lhost_stale = netif::is_local(vars.get("LHOST").map(String::as_str).unwrap_or(""), &ifaces) == Some(false);
+        // IFACE (masscan -e): the interface carrying LHOST
+        if vars.get("IFACE").map(|s| s.is_empty()).unwrap_or(true) {
+            let lhost = vars.get("LHOST").cloned().unwrap_or_default();
+            if let Some((n, _)) = ifaces.iter().find(|(_, ip)| *ip == lhost) {
+                vars.insert("IFACE".into(), n.clone());
             }
         }
         if vars.get("LPORT").map(|s| s.is_empty()).unwrap_or(true) {
@@ -371,7 +400,7 @@ impl App {
             focus: Focus::Categories,
             mode: if skip_splash { Mode::Normal } else { Mode::Splash },
             search: String::new(),
-            status: "ready — type / to search, ? for help".into(),
+            status: lhost_note.unwrap_or_else(|| "ready — type / to search, ? for help".into()),
             should_quit: false,
             confirm_quit: false,
             tick: 0,
@@ -419,6 +448,8 @@ impl App {
             flow_bg,
             mouse: None,
             pinger: if background { Pinger::start() } else { Pinger::idle() },
+            lhost_stale,
+            lhost_watch: background,
             box_started: None,
             box_epoch: None,
             last_rhost: String::new(),
@@ -437,6 +468,9 @@ impl App {
         };
         app.refresh_categories();
         app.clamp();
+        if lhost_changed && background {
+            app.persist_config();
+        }
         app
     }
 
@@ -474,6 +508,9 @@ impl App {
                 // compute the epoch once, here, so Discord's elapsed clock is stable
                 self.box_epoch = Some(crate::discord::now_unix());
             }
+        }
+        if self.lhost_watch && self.tick.is_multiple_of(LHOST_CHECK_TICKS) {
+            self.refresh_lhost_stale();
         }
         if self.session_on && self.tick.is_multiple_of(SESSION_CHECK_TICKS) {
             let full = self.tick.saturating_sub(self.session_full_tick) >= SESSION_FULL_TICKS;
@@ -905,15 +942,25 @@ impl App {
     pub fn vars_commit_edit(&mut self) {
         let keys = self.vars_nav_keys();
         if let Some(k) = keys.get(self.var_idx).cloned() {
+            let lhost = k == "LHOST";
             self.vars.insert(k, self.var_buf.clone());
             self.persist_config();
+            if lhost {
+                self.refresh_lhost_stale();
+            }
         }
         self.var_editing = false;
+    }
+    /// Recompute the header's "LHOST is not a local address" warning.
+    pub fn refresh_lhost_stale(&mut self) {
+        let lhost = self.vars.get("LHOST").cloned().unwrap_or_default();
+        self.lhost_stale = !lhost.is_empty() && netif::is_local(&lhost, &netif::list_ifaces()) == Some(false);
     }
     pub fn vars_detect_lhost(&mut self) {
         if let Some(ip) = netif::detect_lhost() {
             self.vars.insert("LHOST".into(), ip.clone());
             self.persist_config();
+            self.lhost_stale = false;
             self.set_status(format!("LHOST = {ip}"));
         } else {
             self.set_status("could not detect an interface IP");
@@ -2273,6 +2320,9 @@ impl App {
         if let Some((name, buf)) = self.inline_edit.take() {
             self.vars.insert(name.clone(), buf);
             self.persist_config();
+            if name == "LHOST" {
+                self.refresh_lhost_stale();
+            }
             self.set_status(format!("✓ {name} updated"));
         }
     }

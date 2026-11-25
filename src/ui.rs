@@ -177,6 +177,8 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("  ⇡ ", Style::default().fg(ACCENT2)),
         if lhost.is_empty() && lport.is_empty() {
             Span::styled("no listener", Style::default().fg(WARN))
+        } else if app.lhost_stale {
+            Span::styled(format!("{listener} ⚠ not local"), Style::default().fg(WARN).add_modifier(Modifier::BOLD))
         } else {
             Span::styled(listener, Style::default().fg(OK).add_modifier(Modifier::BOLD))
         },
