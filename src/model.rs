@@ -124,18 +124,18 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub theme: String,
     /// Enable Discord Rich Presence (opt-in).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub discord_rpc: bool,
     /// Discord application (client) id for Rich Presence; empty = use the
     /// bundled pivt app ([`DEFAULT_DISCORD_APP_ID`]).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub discord_app_id: String,
     /// URL for the "get pivt" presence button; empty = [`REPO_URL`].
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub discord_link: String,
     /// How much the presence reveals: "safe" (default), "full" or "minimal".
     /// A string so a typo falls back to safe instead of failing the parse.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub discord_privacy: String,
     /// Where rooms live; empty = $CTF_ROOT, else ~/TryHackMe if it exists,
     /// else $XDG_DATA_HOME/pivt/rooms. `$CTF_ROOT` beats this setting.

@@ -51,6 +51,8 @@ pub enum Mode {
     History,
     /// Scope editor for a room (`S`, or `s` in the rooms view).
     Scope,
+    /// The settings screen (`,`, see [`crate::settings`]).
+    Settings,
 }
 
 /// A run held back because it targets something outside the room's scope,
@@ -418,6 +420,12 @@ pub struct App {
     pub keys: crate::keys::Keymap,
     /// `[keys]` as written in config.toml, written back untouched.
     keys_cfg: toml::Table,
+    /// Settings screen state (`,`).
+    pub settings: crate::settings::SettingsUi,
+    /// `discord_privacy` / `discord_app_id` as written in config.toml
+    /// (empty = not set, the default applies).
+    discord_privacy_cfg: String,
+    discord_app_id_cfg: String,
 
     matcher: SkimMatcherV2,
 }
@@ -707,6 +715,9 @@ impl App {
             rhost_carried,
             keys,
             keys_cfg: cfg.keys.clone(),
+            settings: Default::default(),
+            discord_privacy_cfg: cfg.discord_privacy.clone(),
+            discord_app_id_cfg: cfg.discord_app_id.clone(),
             matcher: SkimMatcherV2::default(),
         };
         app.apply_prefs();
@@ -760,6 +771,453 @@ impl App {
         self.apply_prefs();
         self.persist_config();
         Ok(())
+    }
+
+    // ── settings screen (`,`): get / set / reset by item ──
+
+    /// Is this row set in config.toml (so `r` has something to remove)?
+    pub fn setting_is_set(&self, it: crate::settings::Item) -> bool {
+        use crate::settings::{Item, Scalar as S};
+        match it {
+            Item::Pref(k) => match crate::prefs::Opt::find(k).map(|o| o.section) {
+                Some(crate::prefs::Section::Layout) => self.layout_cfg.contains_key(k),
+                Some(crate::prefs::Section::Look) => self.look_cfg.contains_key(k),
+                None => false,
+            },
+            Item::Scalar(s) => match s {
+                S::HideMissing => self.hide_missing,
+                S::DiscordRpc => self.discord_rpc,
+                S::DiscordPrivacy => !self.discord_privacy_cfg.is_empty(),
+                S::DiscordAppId => !self.discord_app_id_cfg.is_empty(),
+                S::DiscordLink => !self.discord_link.is_empty(),
+                S::ScopeMode => !self.scope_mode_cfg.is_empty(),
+                S::RoomsDir => !self.path_cfg.0.is_empty(),
+                S::RoomTemplate => self.path_cfg.1.is_some(),
+                S::SyncTargetFile => self.path_cfg.2.is_some(),
+            },
+            Item::Theme(_) => !self.theme_cfg.is_empty(),
+            Item::Key(a) => self.keys_cfg.keys().any(|n| crate::keys::Action::from_name(n) == Some(a)),
+        }
+    }
+
+    /// Current value (raw strings for the text settings).
+    pub fn setting_value(&self, it: crate::settings::Item) -> crate::prefs::Val {
+        use crate::prefs::Val;
+        use crate::settings::{Item, Scalar as S};
+        match it {
+            Item::Pref(k) => self.prefs.get(k).unwrap_or(Val::Bool(false)),
+            Item::Scalar(s) => match s {
+                S::HideMissing => Val::Bool(self.hide_missing),
+                S::DiscordRpc => Val::Bool(self.discord_rpc),
+                S::DiscordPrivacy => Val::Str(self.discord_privacy.as_str().into()),
+                S::DiscordAppId => Val::Str(self.discord_app_id_cfg.clone()),
+                S::DiscordLink => Val::Str(self.discord_link.clone()),
+                S::ScopeMode => Val::Str(self.scope_mode.as_str().into()),
+                S::RoomsDir => Val::Str(self.path_cfg.0.clone()),
+                S::RoomTemplate => Val::Str(self.path_cfg.1.clone().unwrap_or_default()),
+                S::SyncTargetFile => Val::Str(self.path_cfg.2.clone().unwrap_or_default()),
+            },
+            Item::Theme(i) => {
+                let cur = self.settings.theme_live.unwrap_or_else(crate::theme::theme);
+                Val::Bool(crate::theme::all().get(i).is_some_and(|t| std::ptr::eq(*t, cur)))
+            }
+            Item::Key(a) => Val::Str(self.keys.label(a)),
+        }
+    }
+
+    /// The value as shown on screen: empty / unset text settings say what
+    /// applies instead.
+    pub fn setting_display(&self, it: crate::settings::Item) -> String {
+        use crate::settings::{Item, Scalar as S};
+        let home = dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_default();
+        let short = |p: &std::path::Path| {
+            let s = p.display().to_string();
+            if !home.is_empty() && s.starts_with(&home) { s.replacen(&home, "~", 1) } else { s }
+        };
+        match it {
+            Item::Scalar(S::DiscordAppId) if self.discord_app_id_cfg.is_empty() => "‹bundled pivt app›".into(),
+            Item::Scalar(S::DiscordLink) if self.discord_link.is_empty() => "‹pivt repo›".into(),
+            Item::Scalar(S::RoomsDir) if self.path_cfg.0.is_empty() => format!("‹{}›", short(&self.paths.rooms_dir)),
+            Item::Scalar(S::RoomTemplate) => match &self.path_cfg.1 {
+                None => match &self.paths.room_template {
+                    Some(p) => format!("‹{}›", short(p)),
+                    None => "‹none›".into(),
+                },
+                Some(s) if s.is_empty() => "‹none›".into(),
+                Some(s) => s.clone(),
+            },
+            Item::Scalar(S::SyncTargetFile) => match &self.path_cfg.2 {
+                None => match &self.paths.target_file {
+                    Some(p) => format!("‹{}›", short(p)),
+                    None => "‹off›".into(),
+                },
+                Some(s) if s.is_empty() => "‹off›".into(),
+                Some(s) => s.clone(),
+            },
+            Item::Theme(i) => crate::theme::all().get(i).map(|t| t.name.to_string()).unwrap_or_default(),
+            Item::Key(a) if self.keys.keys(a).is_empty() => "‹none›".into(),
+            _ => self.setting_value(it).to_string(),
+        }
+    }
+
+    /// Parse what was typed into a row's text edit (nothing is applied).
+    pub fn setting_parse_text(&self, it: crate::settings::Item, s: &str) -> Result<crate::prefs::Val, String> {
+        use crate::prefs::{Kind, Val};
+        use crate::settings::{Item, Scalar as S};
+        match it {
+            Item::Pref(k) => {
+                let o = crate::prefs::Opt::find(k).ok_or("unknown option")?;
+                match &o.kind {
+                    Kind::Int { min, max, .. } => {
+                        let n: i64 = s.trim().parse().map_err(|_| format!("'{}' isn't a whole number", s.trim()))?;
+                        if n < *min || n > *max {
+                            return Err(format!("{n} is outside {min}..{max}"));
+                        }
+                        Ok(Val::Int(n))
+                    }
+                    Kind::Bool => match s.trim().to_ascii_lowercase().as_str() {
+                        "on" | "true" | "yes" | "1" => Ok(Val::Bool(true)),
+                        "off" | "false" | "no" | "0" => Ok(Val::Bool(false)),
+                        _ => Err("on or off".into()),
+                    },
+                    _ => o.parse(&toml::Value::String(s.to_string())).map(|(v, _)| v),
+                }
+            }
+            Item::Scalar(sc) => {
+                let t = s.trim();
+                let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+                match sc {
+                    S::HideMissing | S::DiscordRpc => {
+                        self.setting_parse_text(Item::Pref("compact"), t)
+                    }
+                    S::DiscordPrivacy | S::ScopeMode => {
+                        let crate::settings::EditKind::Choice(names) = sc.kind() else { unreachable!() };
+                        let l = t.to_ascii_lowercase();
+                        if names.contains(&l.as_str()) {
+                            Ok(Val::Str(l))
+                        } else {
+                            Err(format!("one of {}", names.join(" / ")))
+                        }
+                    }
+                    S::DiscordAppId => {
+                        if t.is_empty() || (t.len() >= 15 && t.len() <= 21 && t.chars().all(|c| c.is_ascii_digit())) {
+                            Ok(Val::Str(t.into()))
+                        } else {
+                            Err("a Discord application id is 15-21 digits (or empty for the bundled app)".into())
+                        }
+                    }
+                    S::DiscordLink => {
+                        if t.is_empty() || ((t.starts_with("https://") || t.starts_with("http://")) && !t.contains(' ')) {
+                            Ok(Val::Str(t.into()))
+                        } else {
+                            Err("needs an http:// or https:// URL (or empty)".into())
+                        }
+                    }
+                    S::RoomsDir => {
+                        if t.is_empty() {
+                            return Ok(Val::Str(String::new()));
+                        }
+                        let p = crate::model::expand_home(t, &home);
+                        if !p.is_absolute() {
+                            Err("use an absolute path or ~/…".into())
+                        } else if p.exists() && !p.is_dir() {
+                            Err(format!("{} is a file, not a directory", p.display()))
+                        } else {
+                            Ok(Val::Str(t.into()))
+                        }
+                    }
+                    S::RoomTemplate => {
+                        if t.is_empty() {
+                            return Ok(Val::Str(String::new()));
+                        }
+                        let p = crate::model::expand_home(t, &home);
+                        if p.is_file() {
+                            Ok(Val::Str(t.into()))
+                        } else {
+                            Err(format!("no such file: {}", p.display()))
+                        }
+                    }
+                    S::SyncTargetFile => {
+                        if t.is_empty() {
+                            return Ok(Val::Str(String::new()));
+                        }
+                        let p = crate::model::expand_home(t, &home);
+                        if p.is_dir() {
+                            Err(format!("{} is a directory", p.display()))
+                        } else if !p.is_absolute() || !p.parent().is_some_and(|d| d.is_dir()) {
+                            Err("needs an absolute path (~ ok) in an existing folder".into())
+                        } else {
+                            Ok(Val::Str(t.into()))
+                        }
+                    }
+                }
+            }
+            Item::Theme(_) | Item::Key(_) => Err("not a text setting".into()),
+        }
+    }
+
+    /// Set a row (validated), apply it live and save. Theme rows ignore `v`
+    /// and select that theme.
+    pub fn setting_set(&mut self, it: crate::settings::Item, v: crate::prefs::Val) -> Result<(), String> {
+        use crate::prefs::Val;
+        use crate::settings::{Item, Scalar as S};
+        match it {
+            Item::Pref(k) => self.set_pref(k, v),
+            Item::Theme(i) => {
+                let t = *crate::theme::all().get(i).ok_or("no such theme")?;
+                self.apply_theme(t, true);
+                Ok(())
+            }
+            Item::Key(_) => Err("keys are captured, not typed".into()),
+            Item::Scalar(sc) => {
+                let v = match v {
+                    Val::Str(s) => self.setting_parse_text(it, &s)?,
+                    other => other,
+                };
+                match (sc, v) {
+                    (S::HideMissing, Val::Bool(b)) => {
+                        self.hide_missing = b;
+                        self.refresh_missing();
+                        self.refresh_categories();
+                        self.clamp();
+                    }
+                    (S::DiscordRpc, Val::Bool(b)) => {
+                        if b != self.discord_rpc {
+                            self.toggle_discord(); // starts / stops the thread, saves
+                        }
+                        return Ok(());
+                    }
+                    (S::DiscordPrivacy, Val::Str(s)) => {
+                        self.discord_privacy = Privacy::parse(&s);
+                        self.discord_privacy_cfg = self.discord_privacy.as_str().into();
+                        self.last_rpc_tick = 0;
+                    }
+                    (S::DiscordAppId, Val::Str(s)) => {
+                        self.discord_app_id_cfg = s;
+                        self.discord_app_id = if self.discord_app_id_cfg.is_empty() {
+                            crate::model::DEFAULT_DISCORD_APP_ID.to_string()
+                        } else {
+                            self.discord_app_id_cfg.clone()
+                        };
+                        // reconnect with the new id if the presence is running
+                        if self.discord.is_some() {
+                            self.discord = Some(DiscordRpc::start(self.discord_app_id.clone()));
+                            self.last_rpc_tick = 0;
+                        }
+                    }
+                    (S::DiscordLink, Val::Str(s)) => {
+                        self.discord_link = s;
+                        self.last_rpc_tick = 0;
+                    }
+                    (S::ScopeMode, Val::Str(s)) => {
+                        self.scope_mode = crate::scope::Mode::parse(&s);
+                        self.scope_mode_cfg = self.scope_mode.as_str().into();
+                    }
+                    (S::RoomsDir, Val::Str(s)) => {
+                        self.path_cfg.0 = s;
+                        self.refresh_paths();
+                    }
+                    (S::RoomTemplate, Val::Str(s)) => {
+                        self.path_cfg.1 = Some(s);
+                        self.refresh_paths();
+                    }
+                    (S::SyncTargetFile, Val::Str(s)) => {
+                        self.path_cfg.2 = Some(s);
+                        self.refresh_paths();
+                    }
+                    (_, v) => return Err(format!("{}: unexpected value {v}", sc.key())),
+                }
+                self.persist_config();
+                Ok(())
+            }
+        }
+    }
+
+    /// Back to the default: the key is removed from config.toml (never
+    /// written as its default value).
+    pub fn setting_reset(&mut self, it: crate::settings::Item) {
+        use crate::settings::{Item, Scalar as S};
+        match it {
+            Item::Pref(k) => {
+                let Some(o) = crate::prefs::Opt::find(k) else { return };
+                crate::prefs::Prefs::store(&mut self.layout_cfg, &mut self.look_cfg, k, None);
+                self.prefs.set(k, o.default_val());
+                self.apply_prefs();
+            }
+            Item::Theme(_) => {
+                self.theme_cfg.clear();
+                crate::theme::set(crate::theme::resolve(""));
+            }
+            Item::Key(a) => {
+                self.keys_cfg.retain(|n, _| crate::keys::Action::from_name(n) != Some(a));
+                self.keys = crate::keys::Keymap::from_config(&self.keys_cfg).0;
+            }
+            Item::Scalar(sc) => match sc {
+                S::HideMissing => {
+                    self.hide_missing = false;
+                    self.refresh_missing();
+                    self.refresh_categories();
+                    self.clamp();
+                }
+                S::DiscordRpc => {
+                    if self.discord_rpc {
+                        self.toggle_discord();
+                    }
+                }
+                S::DiscordPrivacy => {
+                    self.discord_privacy_cfg.clear();
+                    self.discord_privacy = Privacy::parse("");
+                    self.last_rpc_tick = 0;
+                }
+                S::DiscordAppId => {
+                    let _ = self.setting_set(it, crate::prefs::Val::Str(String::new()));
+                }
+                S::DiscordLink => self.discord_link.clear(),
+                S::ScopeMode => {
+                    self.scope_mode_cfg.clear();
+                    self.scope_mode = crate::scope::Mode::parse("");
+                }
+                S::RoomsDir => {
+                    self.path_cfg.0.clear();
+                    self.refresh_paths();
+                }
+                S::RoomTemplate => {
+                    self.path_cfg.1 = None;
+                    self.refresh_paths();
+                }
+                S::SyncTargetFile => {
+                    self.path_cfg.2 = None;
+                    self.refresh_paths();
+                }
+            },
+        }
+        self.persist_config();
+    }
+
+    /// Tests: the raw `[layout]`, `[look]` and `[keys]` tables, the theme
+    /// name and the scope_mode string as they'd be saved, plus the persist flag.
+    #[cfg(test)]
+    pub fn saved_for_tests(&self) -> (&toml::Table, &toml::Table, &toml::Table, &str, &str, bool) {
+        (&self.layout_cfg, &self.look_cfg, &self.keys_cfg, &self.theme_cfg, &self.scope_mode_cfg, self.persist)
+    }
+
+    /// Re-resolve rooms dir / template / target mirror from the path settings.
+    fn refresh_paths(&mut self) {
+        let cfg = Config {
+            rooms_dir: self.path_cfg.0.clone(),
+            room_template: self.path_cfg.1.clone(),
+            sync_target_file: self.path_cfg.2.clone(),
+            ..Config::default()
+        };
+        let target = self.paths.target_file.clone();
+        self.paths = Paths::from_config(&cfg);
+        if !self.persist {
+            self.paths.target_file = target; // tests: never point at a real file
+        }
+    }
+
+    // ── keybindings (settings screen) ──
+
+    /// The keys an action asks for: its `[keys]` entry, else its defaults.
+    pub fn key_wanted(&self, a: crate::keys::Action) -> Vec<crate::keys::Key> {
+        let entry = self.keys_cfg.iter().find(|(n, _)| crate::keys::Action::from_name(n) == Some(a)).map(|(_, v)| v);
+        let strs: Vec<String> = match entry {
+            Some(toml::Value::String(s)) => vec![s.clone()],
+            Some(toml::Value::Array(v)) => v.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+            Some(_) | None => a.defaults().iter().map(|s| s.to_string()).collect(),
+        };
+        strs.iter()
+            .filter_map(|s| crate::keys::parse_key(s))
+            .filter(|k| !crate::keys::is_reserved(k))
+            .collect()
+    }
+
+    /// "⚠ x → note" for every key this action wanted but another one holds.
+    pub fn key_conflicts(&self, a: crate::keys::Action) -> Vec<String> {
+        let got = self.keys.keys(a);
+        self.key_wanted(a)
+            .into_iter()
+            .filter(|k| !got.contains(k))
+            .map(|k| match self.keys.owner(a.ctx(), k) {
+                Some(o) => format!("{} is taken by {}", k.label(), o.name()),
+                None => format!("{} isn't bound", k.label()),
+            })
+            .collect()
+    }
+
+    /// Write an action's keys to `[keys]` (removed when they're the
+    /// defaults), rebuild the keymap and save. Returns the keymap warnings.
+    fn key_write(&mut self, a: crate::keys::Action, keys: Vec<crate::keys::Key>) -> Vec<String> {
+        self.keys_cfg.retain(|n, _| crate::keys::Action::from_name(n) != Some(a));
+        let defaults: Vec<_> = a.defaults().iter().filter_map(|s| crate::keys::parse_key(s)).collect();
+        if keys != defaults {
+            let strs: Vec<String> = keys.iter().filter_map(crate::keys::key_string).collect();
+            let v = if strs.len() == 1 {
+                toml::Value::String(strs[0].clone())
+            } else {
+                toml::Value::Array(strs.into_iter().map(toml::Value::String).collect())
+            };
+            self.keys_cfg.insert(a.name().to_string(), v);
+        }
+        let (m, w) = crate::keys::Keymap::from_config(&self.keys_cfg);
+        self.keys = m;
+        self.persist_config();
+        w
+    }
+
+    /// Bind `k` to `a`: added to its keys, or replacing them. Conflicts
+    /// follow the `[keys]` rules (explicit beats default; between two
+    /// explicit bindings the action listed first wins) and are reported.
+    pub fn key_bind(&mut self, a: crate::keys::Action, k: crate::keys::Key, replace: bool) -> Result<String, String> {
+        if crate::keys::is_reserved(&k) {
+            return Err("ctrl-c is reserved (quit / sent to the program)".into());
+        }
+        if crate::keys::key_string(&k).is_none() {
+            return Err(format!("{} can't be written to [keys]", k.label()));
+        }
+        let before = self.keys.owner(a.ctx(), k).filter(|o| *o != a);
+        let mut keys = self.keys.keys(a).to_vec();
+        if replace {
+            keys = vec![k];
+        } else if keys.contains(&k) {
+            return Ok(format!("{} already does {}", k.label(), a.name()));
+        } else {
+            keys.push(k);
+        }
+        let warnings = self.key_write(a, keys);
+        let owner = self.keys.owner(a.ctx(), k);
+        let mut msg = if owner == Some(a) {
+            format!("✓ {} → {}", k.label(), a.name())
+        } else {
+            format!(
+                "⚠ {} stays with {} (bound explicitly and listed first) — {} didn't get it",
+                k.label(),
+                owner.map(|o| o.name()).unwrap_or("?"),
+                a.name()
+            )
+        };
+        if let Some(o) = before.filter(|_| owner == Some(a)) {
+            let left = self.keys.label(o);
+            msg.push_str(&format!(" · ⚠ was {}'s ({} now: {left})", o.name(), o.name()));
+        }
+        let extra: Vec<&String> = warnings.iter().filter(|w| w.contains(a.name())).collect();
+        if !extra.is_empty() {
+            msg.push_str(&format!(" · {}", extra.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" · ")));
+        }
+        Ok(msg)
+    }
+
+    /// Remove the action's last key. help and detach keep at least one.
+    pub fn key_unbind_last(&mut self, a: crate::keys::Action) -> Result<String, String> {
+        use crate::keys::Action as K;
+        let mut keys = self.keys.keys(a).to_vec();
+        let Some(k) = keys.pop() else { return Err(format!("{} has no key", a.name())) };
+        if keys.is_empty() && matches!(a, K::Help | K::Detach | K::Settings) {
+            return Err(format!("{} needs a key — bind another one first", a.name()));
+        }
+        self.key_write(a, keys);
+        let tail = if a == K::Quit && self.keys.keys(a).is_empty() { " · ctrl-c still quits" } else { "" };
+        Ok(format!("✓ removed {} from {}{tail}", k.label(), a.name()))
     }
 
     /// The run pane's inner (rows, cols) for the current terminal and layout.
@@ -1198,6 +1656,7 @@ impl App {
     /// Cycle what the presence reveals: safe → full → minimal (persisted).
     pub fn cycle_discord_privacy(&mut self) {
         self.discord_privacy = self.discord_privacy.next();
+        self.discord_privacy_cfg = self.discord_privacy.as_str().to_string();
         self.persist_config();
         self.last_rpc_tick = 0; // re-push now, so a downgrade takes effect at once
         let m = self.discord_privacy;
@@ -1359,9 +1818,9 @@ impl App {
             hide_missing: self.hide_missing,
             theme: self.theme_cfg.clone(),
             discord_rpc: self.discord_rpc,
-            discord_app_id: self.discord_app_id.clone(),
+            discord_app_id: self.discord_app_id_cfg.clone(),
             discord_link: self.discord_link.clone(),
-            discord_privacy: self.discord_privacy.as_str().to_string(),
+            discord_privacy: self.discord_privacy_cfg.clone(),
             rooms_dir: self.path_cfg.0.clone(),
             room_template: self.path_cfg.1.clone(),
             sync_target_file: self.path_cfg.2.clone(),

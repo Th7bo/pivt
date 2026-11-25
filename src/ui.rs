@@ -57,6 +57,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::Theme => draw_theme_picker(f, app),
         Mode::History => draw_history(f, app),
         Mode::Scope => draw_scope(f, app),
+        Mode::Settings => draw_settings(f, app),
         _ => {}
     }
 
@@ -915,6 +916,32 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Mode::History => &[("↑↓", "move"), ("⏎", "copy"), ("x", "re-run"), ("l", "log"), ("/", "filter"), ("esc", "close")],
         Mode::Htb if app.htb_input.is_some() => &[("type", "answer"), ("⏎", "submit"), ("esc", "cancel")],
         Mode::Htb => &[("↑↓", "task"), ("⏎", "answer"), ("h", "hint"), ("m", "machine"), ("s/t", "spawn/stop"), ("r", "refresh"), ("esc", "close")],
+        Mode::Settings => {
+            let st = &app.settings;
+            let kind = app.settings_selected().map(|i| i.kind());
+            use crate::settings::EditKind as K;
+            let pairs: &[(&str, &str)] = if st.capture.is_some() {
+                &[("press", "a key"), ("⌫", "remove last"), ("esc", "cancel")]
+            } else if st.edit.is_some() {
+                &[("type", "value"), ("⏎", "save"), ("esc", "cancel")]
+            } else if st.filtering {
+                &[("type", "filter"), ("⏎/↓", "done"), ("esc", "clear")]
+            } else if !st.right {
+                &[("↑↓", "section"), ("⏎/→", "options"), ("/", "filter"), ("esc", "close")]
+            } else {
+                match kind {
+                    Some(K::Key) => &[("⏎", "add key"), ("c", "replace"), ("⌫", "remove"), ("r", "default"), ("esc", "back")],
+                    Some(K::Theme) => &[("↑↓", "preview"), ("⏎", "keep"), ("r", "default"), ("esc", "back")],
+                    Some(K::Bool) => &[("⏎/space", "toggle"), ("←→", "off/on"), ("r", "default"), ("/", "filter"), ("esc", "back")],
+                    Some(K::Int { .. }) => &[("←→", "step"), ("⏎", "type"), ("r", "default"), ("/", "filter"), ("esc", "back")],
+                    Some(K::Choice(_)) => &[("←→/⏎", "cycle"), ("r", "default"), ("/", "filter"), ("esc", "back")],
+                    Some(K::Glyphs) => &[("←→", "preset"), ("⏎", "type"), ("r", "default"), ("esc", "back")],
+                    _ => &[("⏎", "edit"), ("r", "default"), ("/", "filter"), ("esc", "back")],
+                }
+            };
+            render_footer(f, app, area, pairs);
+            return;
+        }
         Mode::Normal => &[],
     };
     render_footer(f, app, area, pairs);
@@ -2321,10 +2348,10 @@ fn draw_help(f: &mut Frame, app: &App) {
         row(&l(A::Htb), "Hack The Box: machine, guided tasks + hints, flags"),
         row(&l(A::Vars), "edit variables (split: this cmd / all)"),
         row(&l(A::Favorite), "pin ★ favorite (shows ★/⏱ categories)"),
-        row(&j(&[A::Bg, A::Theme, A::ThemePicker]), &format!(
-            "background {} · theme / picker: {}",
+        row(&[A::Settings, A::Bg, A::Theme, A::ThemePicker].map(|a| k.compact(a)).join("/"), &format!(
+            "settings (all) · bg {} · theme: {}",
             app.prefs.background.as_str(),
-            theme().name.chars().take(20).collect::<String>()
+            theme().name.chars().take(18).collect::<String>()
         )),
         row(&j(&[A::Discord, A::DiscordPrivacy]), &format!(
             "Discord presence {} · privacy: {}",
@@ -2356,4 +2383,347 @@ fn draw_help(f: &mut Frame, app: &App) {
         )),
     ];
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+// ───────────────────────────── settings (`,`) ─────────────────────────────
+
+/// Display width of a string.
+fn width_of(s: &str) -> usize {
+    Span::raw(s).width()
+}
+
+/// Truncate (with …) or pad `s` to exactly `w` columns.
+fn fit(s: &str, w: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0;
+    let total = width_of(s);
+    for c in s.chars() {
+        let cw = width_of(&c.to_string());
+        if total > w && used + cw + 1 > w {
+            if w > used {
+                out.push('…');
+                used += 1;
+            }
+            break;
+        }
+        if used + cw > w {
+            break;
+        }
+        out.push(c);
+        used += cw;
+    }
+    out.push_str(&" ".repeat(w.saturating_sub(used)));
+    out
+}
+
+/// The settings overlay rect: the whole screen (minus the footer) when
+/// small, a centred box when large.
+fn settings_area(full: Rect) -> Rect {
+    let avail_h = full.height.saturating_sub(1).max(1);
+    let w = if full.width <= 92 { full.width } else { (full.width as u32 * 85 / 100).clamp(92, 132) as u16 };
+    let h = if avail_h <= 30 { avail_h } else { (avail_h as u32 * 85 / 100).clamp(30, 46) as u16 };
+    let x = full.x + (full.width - w) / 2;
+    let y = full.y + (avail_h - h) / 2;
+    Rect::new(x, y, w, h)
+}
+
+fn draw_settings(f: &mut Frame, app: &App) {
+    use crate::settings::{EditKind, Item, Sec};
+    let t = theme();
+    let area = settings_area(f.area());
+    if area.width < 20 || area.height < 6 {
+        return;
+    }
+    f.render_widget(Clear, area);
+    let s = &app.settings;
+    let rows = app.settings_rows();
+    let changed: usize = Sec::ALL.iter().map(|x| app.settings_custom_count(*x)).sum();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(btype(app))
+        .border_style(Style::default().fg(t.accent))
+        .title(Span::styled(" settings ", Style::default().fg(t.accent).add_modifier(Modifier::BOLD)))
+        .title(
+            Line::from(Span::styled(
+                format!(" {changed} changed in config.toml "),
+                Style::default().fg(if changed > 0 { t.accent2 } else { t.dim }),
+            ))
+            .right_aligned(),
+        )
+        .style(Style::default().bg(t.panel));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let detail_h = if inner.height >= 14 { 4 } else { 2 };
+    let v = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(detail_h)])
+        .split(inner);
+
+    // ── filter line ──
+    let filtering = s.filtering || !s.filter.is_empty();
+    let mut fl = vec![Span::styled(" / ", Style::default().fg(t.accent).add_modifier(Modifier::BOLD))];
+    if filtering {
+        fl.push(Span::styled(
+            format!("{}{}", s.filter, if s.filtering { "▏" } else { "" }),
+            Style::default().fg(t.fg).add_modifier(Modifier::BOLD),
+        ));
+        fl.push(Span::styled(
+            format!("   {} match{}", rows.len(), if rows.len() == 1 { "" } else { "es" }),
+            Style::default().fg(if rows.is_empty() { t.warn } else { t.dim }),
+        ));
+    } else {
+        fl.push(Span::styled("filter every option by name or description", Style::default().fg(t.dim)));
+    }
+    f.render_widget(Paragraph::new(Line::from(fl)), v[0]);
+
+    // ── sections | options ──
+    let sec_w: u16 = if v[1].width >= 70 { 22 } else if v[1].width >= 48 { 18 } else { 0 };
+    let h = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(sec_w), Constraint::Length(if sec_w > 0 { 1 } else { 0 }), Constraint::Min(1)])
+        .split(v[1]);
+    if sec_w > 0 {
+        let mut lines = Vec::new();
+        for (i, sec) in Sec::ALL.iter().enumerate() {
+            let sel = i == s.sec && !filtering;
+            let n = app.settings_custom_count(*sec);
+            let mark = if sel && !s.right { app.marker() } else if sel { "›".into() } else { " ".into() };
+            let count = if n > 0 { format!("{n}●") } else { String::new() };
+            let name_w = (sec_w as usize).saturating_sub(3 + width_of(&count));
+            let style = if sel && !s.right {
+                Style::default().fg(t.fg).bg(t.sel_bg).add_modifier(Modifier::BOLD)
+            } else if sel {
+                Style::default().fg(t.accent2).add_modifier(Modifier::BOLD)
+            } else if filtering {
+                Style::default().fg(t.dim)
+            } else {
+                Style::default().fg(t.subtle)
+            };
+            lines.push(
+                Line::from(vec![
+                    Span::styled(mark, Style::default().fg(app.pulse())),
+                    Span::raw(" "),
+                    Span::styled(fit(sec.title(), name_w), style),
+                    Span::styled(format!("{count} "), Style::default().fg(t.accent2)),
+                ])
+                .style(if sel && !s.right { Style::default().bg(t.sel_bg) } else { Style::default() }),
+            );
+        }
+        f.render_widget(Paragraph::new(lines), h[0]);
+        let sep: Vec<Line> = (0..h[1].height).map(|_| Line::from(Span::styled("│", Style::default().fg(t.border)))).collect();
+        f.render_widget(Paragraph::new(sep), h[1]);
+    }
+
+    // ── options ──
+    let right = h[2];
+    let w = right.width as usize;
+    let name_w = if w >= 90 { 22 } else if w >= 60 { 18 } else { 14 };
+    let val_w = if w >= 90 { 24 } else if w >= 60 { 18 } else { 12 };
+    // narrow: a one-cell ●/· badge instead of "● set" / "default"
+    let badge_w = if w >= 80 { 8 } else { 1 };
+    let desc_w = w.saturating_sub(2 + name_w + 1 + val_w + 1 + badge_w + 1);
+    let sel_row = if s.right { Some(s.row.min(rows.len().saturating_sub(1))) } else { None };
+    let mut items: Vec<ListItem> = Vec::new();
+    for (i, it) in rows.iter().enumerate() {
+        let sel = sel_row == Some(i);
+        let set = app.setting_is_set(*it);
+        let kind = it.kind();
+        let mut spans = vec![
+            Span::styled(if sel { app.marker() } else { " ".into() }, Style::default().fg(app.pulse())),
+            Span::raw(" "),
+            Span::styled(
+                fit(&it.name(), name_w),
+                Style::default()
+                    .fg(if sel { t.fg } else { t.subtle })
+                    .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
+            ),
+            Span::raw(" "),
+        ];
+        // value cell
+        let editing = sel && s.edit.is_some();
+        let capturing = sel && s.capture.is_some();
+        if editing {
+            let buf = s.edit.clone().unwrap_or_default();
+            let bad = s.edit_err.is_some();
+            let ew = val_w + 1 + badge_w + 1 + desc_w;
+            // keep the end of a long buffer (the cursor) in view
+            let shown: String = {
+                let n = buf.chars().count();
+                let keep = ew.saturating_sub(2);
+                if n > keep { buf.chars().skip(n - keep).collect() } else { buf.clone() }
+            };
+            spans.push(Span::styled(
+                fit(&format!("{shown}▏"), ew),
+                Style::default().fg(if bad { t.warn } else { t.fg }).bg(t.sel_bg).add_modifier(Modifier::BOLD),
+            ));
+            items.push(ListItem::new(Line::from(spans)));
+            continue;
+        }
+        if capturing {
+            let replace = s.capture.is_some_and(|c| c.1);
+            spans.push(Span::styled(
+                fit(if replace { "press the new key…" } else { "press a key to add…" }, val_w),
+                Style::default().fg(app.pulse()).add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            let disp = app.setting_display(*it);
+            let (txt, style) = match kind {
+                EditKind::Bool => {
+                    let on = disp == "on";
+                    (
+                        if on { "● on".to_string() } else { "○ off".to_string() },
+                        Style::default().fg(if on { t.ok } else { t.dim }),
+                    )
+                }
+                EditKind::Int { .. } | EditKind::Choice(_) | EditKind::Glyphs => {
+                    let unit = match it {
+                        Item::Pref(k) => match crate::prefs::Opt::find(k).map(|o| &o.kind) {
+                            Some(crate::prefs::Kind::Int { unit, .. }) if !unit.is_empty() => format!(" {unit}"),
+                            _ => String::new(),
+                        },
+                        _ => String::new(),
+                    };
+                    (
+                        if sel { format!("‹ {disp}{unit} ›") } else { format!("  {disp}{unit}") },
+                        Style::default().fg(t.accent).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
+                    )
+                }
+                EditKind::Theme => (String::new(), Style::default()),
+                EditKind::Key => (
+                    disp.clone(),
+                    Style::default().fg(if disp.starts_with('‹') { t.warn } else { t.accent }).add_modifier(Modifier::BOLD),
+                ),
+                EditKind::Text => (
+                    disp.clone(),
+                    Style::default().fg(if disp.starts_with('‹') { t.dim } else { t.fg }),
+                ),
+            };
+            if let (EditKind::Theme, Item::Theme(ti)) = (kind, it) {
+                if let Some(th) = crate::theme::all().get(*ti) {
+                    let mut used = 0;
+                    for c in [th.accent, th.accent2, th.ok, th.warn, th.gold, th.syn_flag, th.orange] {
+                        if used + 2 > val_w {
+                            break;
+                        }
+                        spans.push(Span::styled("██", Style::default().fg(c).bg(th.bg)));
+                        used += 2;
+                    }
+                    spans.push(Span::raw(" ".repeat(val_w - used)));
+                }
+            } else {
+                spans.push(Span::styled(fit(&txt, val_w), style));
+            }
+        }
+        spans.push(Span::raw(" "));
+        // badge: set in config / default / in use
+        let in_use = matches!(it, Item::Theme(_)) && app.setting_value(*it) == crate::prefs::Val::Bool(true);
+        let (badge, bstyle) = if in_use {
+            ("● in use", Style::default().fg(t.ok))
+        } else if matches!(it, Item::Theme(0)) {
+            ("default", Style::default().fg(t.dim))
+        } else if matches!(it, Item::Theme(_)) {
+            ("", Style::default())
+        } else if set {
+            ("● set", Style::default().fg(t.accent2))
+        } else {
+            ("default", Style::default().fg(t.dim))
+        };
+        let badge = if badge_w == 1 {
+            match badge {
+                "" => " ",
+                "default" => "·",
+                _ => "●",
+            }
+        } else {
+            badge
+        };
+        spans.push(Span::styled(fit(badge, badge_w), bstyle));
+        spans.push(Span::raw(" "));
+        // description (or the first conflict, in warn)
+        let conflicts = match it {
+            Item::Key(a) => app.key_conflicts(*a),
+            _ => Vec::new(),
+        };
+        if desc_w > 3 {
+            let (d, ds) = if let Some(c) = conflicts.first() {
+                (format!("⚠ {c}"), Style::default().fg(t.warn))
+            } else {
+                let mut d = it.desc();
+                if filtering {
+                    d = format!("{} · {d}", it.sec().title());
+                }
+                if let Some(n) = it.restart_note() {
+                    d = format!("↻ {n} · {d}");
+                }
+                (d, Style::default().fg(t.muted))
+            };
+            spans.push(Span::styled(fit(&d, desc_w), ds));
+        } else if !conflicts.is_empty() {
+            spans.push(Span::styled("⚠", Style::default().fg(t.warn)));
+        }
+        let line = Line::from(spans);
+        items.push(ListItem::new(if sel { line.style(Style::default().bg(t.sel_bg)) } else { line }));
+    }
+    if rows.is_empty() {
+        items.push(ListItem::new(Line::from(Span::styled("   nothing matches", Style::default().fg(t.dim)))));
+    }
+    let mut state = ListState::default();
+    state.select(sel_row);
+    f.render_stateful_widget(List::new(items), right, &mut state);
+
+    // ── detail ──
+    let d = v[2];
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled("─".repeat(d.width as usize), Style::default().fg(t.border)))];
+    let label = |s: &str| Span::styled(s.to_string(), Style::default().fg(t.dim));
+    match app.settings_selected() {
+        Some(it) => {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {}", it.name()), Style::default().fg(t.accent).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("  {}", it.desc()), Style::default().fg(t.fg)),
+            ]));
+            let mut l2 = vec![label(" "), Span::styled(it.range(), Style::default().fg(t.subtle))];
+            if !matches!(it, Item::Theme(_)) {
+                l2.push(label(" · default "));
+                l2.push(Span::styled(app.setting_default_display(it), Style::default().fg(t.subtle)));
+            }
+            lines.push(Line::from(l2));
+            let note = if let Some(e) = s.edit_err.as_ref().filter(|_| s.edit.is_some()) {
+                Some((format!(" ✗ not saved: {e}"), t.warn))
+            } else if s.edit.is_some() {
+                Some((" ⏎ save · esc cancel · ^u clear".to_string(), t.dim))
+            } else if s.capture.is_some() {
+                Some((" press the key · esc cancel · ⌫ remove the last key · ctrl-c is reserved".into(), t.accent))
+            } else if let Item::Key(a) = it {
+                let c = app.key_conflicts(a);
+                if c.is_empty() {
+                    None
+                } else {
+                    Some((format!(" ⚠ {}", c.join(" · ")), t.warn))
+                }
+            } else {
+                it.restart_note().map(|n| (format!(" ↻ {n}"), t.gold))
+            };
+            if let Some((n, c)) = note {
+                lines.push(Line::from(Span::styled(n, Style::default().fg(c))));
+            }
+        }
+        None => {
+            let sec = s.section();
+            let n = crate::settings::items(sec).len();
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {}", sec.title()), Style::default().fg(t.accent).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("  {n} {} · {} changed", if sec == Sec::Theme { "themes" } else { "options" }, app.settings_custom_count(sec)),
+                    Style::default().fg(t.fg),
+                ),
+            ]));
+            lines.push(Line::from(label(" changes apply live and save to config.toml · r resets (removes the key)")));
+        }
+    }
+    // the short detail area shows the most important lines
+    if d.height < lines.len() as u16 {
+        lines.remove(0);
+    }
+    f.render_widget(Paragraph::new(lines), d);
 }

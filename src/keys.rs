@@ -80,6 +80,7 @@ actions! {
     Bg => "bg", Normal, ["b"], "cycle background: stars / flow / off";
     Theme => "theme", Normal, ["t"], "next theme";
     ThemePicker => "theme_picker", Normal, ["T"], "theme picker";
+    Settings => "settings", Normal, [","], "settings: every option, live";
     Discord => "discord", Normal, ["D"], "Discord presence on / off";
     DiscordPrivacy => "discord_privacy", Normal, ["M"], "cycle Discord privacy";
     Gtfobins => "gtfobins", Normal, ["g"], "GTFOBins lookup";
@@ -261,6 +262,52 @@ pub fn parse_key(s: &str) -> Option<Key> {
     Some(Key::new(code, mods))
 }
 
+/// The config spelling of a key ([`parse_key`] reads it back), or `None`
+/// for keys `[keys]` can't express (media keys, keypad begin…).
+pub fn key_string(k: &Key) -> Option<String> {
+    let base = match k.code {
+        KeyCode::Char(' ') => "space".to_string(),
+        KeyCode::Char(c) if !c.is_control() => c.to_string(),
+        KeyCode::F(n) => format!("f{n}"),
+        KeyCode::Enter => "enter".into(),
+        KeyCode::Esc => "esc".into(),
+        KeyCode::Tab => "tab".into(),
+        KeyCode::BackTab => "backtab".into(),
+        KeyCode::Up => "up".into(),
+        KeyCode::Down => "down".into(),
+        KeyCode::Left => "left".into(),
+        KeyCode::Right => "right".into(),
+        KeyCode::PageUp => "pgup".into(),
+        KeyCode::PageDown => "pgdn".into(),
+        KeyCode::Home => "home".into(),
+        KeyCode::End => "end".into(),
+        KeyCode::Delete => "delete".into(),
+        KeyCode::Backspace => "backspace".into(),
+        KeyCode::Insert => "insert".into(),
+        _ => return None,
+    };
+    let mut out = String::new();
+    if k.mods.contains(KeyModifiers::CONTROL) {
+        out.push_str("ctrl-");
+    }
+    if k.mods.contains(KeyModifiers::ALT) {
+        out.push_str("alt-");
+    }
+    if k.mods.contains(KeyModifiers::SHIFT) {
+        out.push_str("shift-");
+    }
+    if k.code == KeyCode::BackTab && out.is_empty() {
+        return Some("shift-tab".into());
+    }
+    out.push_str(&base);
+    Some(out)
+}
+
+/// ctrl-c: always quits (or reaches the program), never remappable.
+pub fn is_reserved(k: &Key) -> bool {
+    *k == ctrl_c()
+}
+
 fn ctrl_c() -> Key {
     Key::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
 }
@@ -429,6 +476,11 @@ impl Keymap {
         None
     }
 
+    /// The action holding exactly this key in `ctx`, if any.
+    pub fn owner(&self, ctx: Ctx, k: Key) -> Option<Action> {
+        self.lookup.get(&(ctx, k)).copied()
+    }
+
     /// Does this key trigger `a` (in `a`'s own context)?
     pub fn is(&self, a: Action, ev: &KeyEvent) -> bool {
         self.resolve(&[a.ctx()], ev) == Some(a)
@@ -565,6 +617,26 @@ mod tests {
     }
 
     #[test]
+    fn key_string_round_trips() {
+        for s in [
+            "x", "X", "?", "-", ",", "é", "space", "ctrl-r", "ctrl-]", "ctrl--", "alt-x", "alt-X", "ctrl-alt-x",
+            "shift-tab", "shift-up", "f1", "f12", "ctrl-f5", "enter", "esc", "tab", "up", "down", "left", "right",
+            "pgup", "pgdn", "home", "end", "delete", "backspace", "insert",
+        ] {
+            let k = parse_key(s).unwrap();
+            let back = key_string(&k).unwrap_or_else(|| panic!("{s}"));
+            assert_eq!(parse_key(&back), Some(k), "{s} → {back}");
+        }
+        assert_eq!(key_string(&parse_key("shift-tab").unwrap()).unwrap(), "shift-tab");
+        assert_eq!(key_string(&Key::new(KeyCode::Char('R'), S)).unwrap(), "R");
+        assert!(key_string(&Key::new(KeyCode::Null, N)).is_none());
+        assert!(is_reserved(&Key::new(KeyCode::Char('C'), C)));
+        let m = Keymap::default();
+        assert_eq!(m.owner(Ctx::Normal, parse_key("x").unwrap()), Some(Action::Run));
+        assert_eq!(m.owner(Ctx::Run, parse_key("x").unwrap()), None);
+    }
+
+    #[test]
     fn labels_render_nicely() {
         let l = |s: &str| parse_key(s).unwrap().label();
         assert_eq!(l("ctrl-r"), "^r");
@@ -595,7 +667,7 @@ mod tests {
             ('?', Help), ('c', Rooms), ('w', Note), ('o', Notes), ('L', Loot), ('f', Favorite),
             ('b', Bg), ('t', Theme), ('T', ThemePicker), ('D', Discord), ('M', DiscordPrivacy),
             ('g', Gtfobins), ('P', Parse), ('R', Recipes), ('H', Htb), ('F', Flag), ('E', Export),
-            ('m', Missing), ('y', History), ('S', Scope),
+            ('m', Missing), ('y', History), ('S', Scope), (',', Settings),
         ];
         for (c, a) in normal {
             assert_eq!(nm(ch(c)), Some(a), "{c}");

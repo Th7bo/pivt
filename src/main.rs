@@ -17,6 +17,7 @@ mod room;
 mod runner;
 mod scope;
 mod session;
+mod settings;
 mod theme;
 mod tools;
 mod ui;
@@ -286,6 +287,38 @@ fn snapshot(what: &str, theme: Option<&str>, (width, height): (u16, u16)) {
             app.add.field = 3;
         }
         "help" => app.mode = Mode::Help,
+        // settings · settings:<section> (general, look, layout, theme,
+        // discord, scope, paths, keys) · settings:capture · settings:edit
+        s if s == "settings" || s.starts_with("settings:") => {
+            app.mode = Mode::Normal;
+            app.open_settings();
+            match s.strip_prefix("settings:") {
+                Some("capture") => {
+                    app.settings_goto(settings::Sec::Keys);
+                    app.settings.row = 5;
+                    app.settings_activate(false);
+                }
+                Some("edit") => {
+                    app.settings_goto(settings::Sec::Look);
+                    app.settings.row = settings::items(settings::Sec::Look)
+                        .iter()
+                        .position(|i| *i == settings::Item::Pref("marker"))
+                        .unwrap_or(0);
+                    app.settings_activate(false);
+                    app.settings.edit = Some("ab".into());
+                    app.settings.edit_err = Some("marker: 'ab' needs 1..1 characters (or a preset: bar/arrow/dot/chevron)".into());
+                }
+                Some(q) if q.starts_with('/') => {
+                    app.settings.filter = q[1..].to_string();
+                    app.settings.right = true;
+                }
+                Some(sec) => match settings::Sec::from_slug(sec) {
+                    Some(sec) => app.settings_goto(sec),
+                    None => app.set_status(format!("unknown section '{sec}'")),
+                },
+                None => {}
+            }
+        }
         // run inside a room dir (cwd) to see its scope
         "scope" => {
             app.mode = Mode::Normal;
@@ -622,6 +655,11 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         }
         return;
     }
+    // capturing a key in the settings screen: ctrl-c is refused there, not quit
+    if app.mode == Mode::Settings && app.settings.capture.is_some() {
+        settings::handle_key(app, key);
+        return;
+    }
     // global: ctrl-c quits (asking first while jobs are running)
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         app.request_quit();
@@ -660,6 +698,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         },
         Mode::History => history_keys(app, key),
         Mode::Scope => scope_keys(app, key),
+        Mode::Settings => settings::handle_key(app, key),
         Mode::Export => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => app.export_writeup(true),
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Enter => app.export_writeup(false),
@@ -712,6 +751,7 @@ fn handle_paste(app: &mut App, text: &str) {
         Mode::Flag => app.flag_buf.push_str(&line),
         Mode::Gtfo => line.chars().for_each(|c| app.gtfo_push(c)),
         Mode::History => line.chars().for_each(|c| app.history_push(c)),
+        Mode::Settings => settings::handle_paste(app, &line),
         Mode::Scope => {
             if let Some(b) = app.scope_edit.input.as_mut() {
                 b.push_str(&line);
@@ -1085,6 +1125,7 @@ fn dispatch(app: &mut App, a: Action) {
         Action::Bg => app.toggle_bg(),
         Action::Theme => app.cycle_theme(true),
         Action::ThemePicker => app.open_theme_picker(),
+        Action::Settings => app.open_settings(),
         Action::Discord => app.toggle_discord(),
         Action::DiscordPrivacy => app.cycle_discord_privacy(),
         Action::Gtfobins => app.open_gtfo(),
