@@ -142,6 +142,8 @@ const SESSION_FULL_TICKS: u64 = 600;
 
 /// A hashcat run started from the loot view, waiting for its tab to exit.
 pub struct PendingCrack {
+    /// The crack tab's [`RunJob::id`] (titles repeat across retries).
+    pub job_id: u64,
     pub title: String,
     pub hash: String,
     pub out: std::path::PathBuf,
@@ -177,6 +179,8 @@ pub struct App {
     pub search: String,
     pub status: String,
     pub should_quit: bool,
+    /// "N jobs running — quit? y/N" is showing.
+    pub confirm_quit: bool,
     pub tick: u64,
     pub splash_start: u64,
 
@@ -282,8 +286,24 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
-        let commands = load_commands();
-        let cfg = load_config();
+        Self::build(load_commands(), load_config(), true)
+    }
+
+    /// For `pivt snap`: same data, but no Discord / pinger background threads.
+    pub fn headless() -> Self {
+        Self::build(load_commands(), load_config(), false)
+    }
+
+    /// Bundled commands, default config, no background threads (no user files read).
+    #[cfg(test)]
+    pub fn for_tests() -> Self {
+        let mut a = Self::build(crate::model::load_bundled_for_tests(), Config::default(), false);
+        a.logging = false;
+        a
+    }
+
+    /// `background` = start the Discord RPC and ping threads.
+    fn build(commands: Vec<Command>, cfg: Config, background: bool) -> Self {
         let favorites = cfg.favorites.clone();
         let recent = cfg.recent.clone();
         let flow_bg = cfg.flow_bg;
@@ -294,7 +314,7 @@ impl App {
             cfg.discord_app_id.clone()
         };
         // Connect to Discord only when opted in and an app id is configured.
-        let discord = if discord_rpc && !discord_app_id.is_empty() {
+        let discord = if background && discord_rpc && !discord_app_id.is_empty() {
             Some(DiscordRpc::start(discord_app_id.clone()))
         } else {
             None
@@ -353,6 +373,7 @@ impl App {
             search: String::new(),
             status: "ready — type / to search, ? for help".into(),
             should_quit: false,
+            confirm_quit: false,
             tick: 0,
             splash_start: 0,
             var_idx: 0,
@@ -397,7 +418,7 @@ impl App {
             gtfo_idx: 0,
             flow_bg,
             mouse: None,
-            pinger: Pinger::start(),
+            pinger: if background { Pinger::start() } else { Pinger::idle() },
             box_started: None,
             box_epoch: None,
             last_rhost: String::new(),
@@ -938,15 +959,22 @@ impl App {
             return false;
         }
         let new_phs = extract_placeholders(&tmpl);
-        let cmd = Command {
+        let mut cmd = Command {
             category: cat.to_string(),
             name: name.to_string(),
             description: self.add.description.trim().to_string(),
             template: tmpl.to_string(),
             tags: vec![],
             steps: vec![],
+            side: Default::default(),
+            raw_pty: false,
             user: true,
         };
+        // overriding an existing command keeps where it runs
+        if let Some(old) = self.commands.iter().find(|c| c.category == cmd.category && c.name == cmd.name) {
+            cmd.side = old.side;
+            cmd.raw_pty = old.raw_pty;
+        }
         // override existing same (cat,name) or push
         if let Some(slot) = self
             .commands
@@ -1115,10 +1143,37 @@ impl App {
         self.mode = Mode::Normal;
     }
 
+    // ── quitting ──
+    /// Run tabs whose process is still alive (quitting would kill them).
+    pub fn running_jobs(&self) -> usize {
+        self.runs.iter().filter(|j| j.is_running()).count()
+    }
+
+    /// Quit now, or ask first while jobs (shells, scans, cracks) are running.
+    pub fn request_quit(&mut self) {
+        if self.running_jobs() > 0 {
+            self.confirm_quit = true;
+        } else {
+            self.should_quit = true;
+        }
+    }
+
+    /// Answer the quit prompt: `yes` quits, anything else goes back.
+    pub fn answer_quit(&mut self, yes: bool) {
+        self.confirm_quit = false;
+        if yes {
+            self.should_quit = true;
+        }
+    }
+
     // ── run pane ──
     /// Execute the selected command's step(s), each in its own tab.
     pub fn run_selected(&mut self) {
         let Some(cmd) = self.selected_cmd().cloned() else { return };
+        if cmd.is_target() {
+            self.set_status(format!("⛔ {TARGET_SIDE_MSG}"));
+            return;
+        }
         let missing = self.missing_vars(&cmd);
         if !missing.is_empty() {
             self.set_status(format!("⚠ set {} before running (e)", missing.join(", ")));
@@ -1140,6 +1195,11 @@ impl App {
     /// Spawn every step of `cmd` in its own run tab (logging each), and push it
     /// to recent. Returns how many tabs started. Callers check missing vars.
     fn spawn_cmd(&mut self, cmd: &Command) -> usize {
+        // never execute victim-side payloads on this machine
+        if cmd.is_target() {
+            self.set_status(format!("⛔ {TARGET_SIDE_MSG}"));
+            return 0;
+        }
         let steps = cmd.run_steps();
         let multi = steps.len() > 1;
         let (rows, cols) = crate::runner::pane_size(self.run_fullscreen);
@@ -1152,7 +1212,7 @@ impl App {
             } else {
                 cmd.name.clone()
             };
-            match RunJob::spawn(title.clone(), filled.clone(), rows, cols, cwd.as_deref()) {
+            match RunJob::spawn(title.clone(), cmd.wrap_for_run(&filled), rows, cols, cwd.as_deref()) {
                 Ok(job) => {
                     if self.logging {
                         let target = self.vars.get("RHOST").cloned().unwrap_or_default();
@@ -1345,6 +1405,10 @@ impl App {
                     skipped.push(format!("{step} (unknown)"));
                     continue;
                 };
+                if cmd.is_target() {
+                    skipped.push(format!("{} (target-side, copy it)", cmd.name));
+                    continue;
+                }
                 let missing = self.missing_vars(&cmd);
                 if !missing.is_empty() {
                     skipped.push(format!("{} (needs {})", cmd.name, missing.join(",")));
@@ -1440,6 +1504,11 @@ impl App {
             return;
         }
         let (title, cmd) = (job.title.clone(), job.cmd.clone());
+        // a tab from an older session could hold a target-side command
+        if self.is_target_tab(&title) {
+            self.set_status(format!("⛔ {TARGET_SIDE_MSG}"));
+            return;
+        }
         // the room dir may be gone since the session was saved
         let cwd = job.cwd.clone().filter(|d| d.is_dir());
         let (rows, cols) = crate::runner::pane_size(self.run_fullscreen);
@@ -1455,6 +1524,16 @@ impl App {
             }
             Err(e) => self.set_status(format!("✗ spawn failed: {e}")),
         }
+    }
+
+    /// Whether a run tab titled `title` ("name" or "name [n]") belongs to a
+    /// target-side command.
+    fn is_target_tab(&self, title: &str) -> bool {
+        let base = match title.rsplit_once(" [") {
+            Some((b, rest)) if rest.ends_with(']') => b,
+            _ => title,
+        };
+        self.commands.iter().any(|c| c.is_target() && (c.name == title || c.name == base))
     }
 
     // ── persistent session ──
@@ -1934,8 +2013,9 @@ impl App {
                     let target = self.vars.get("RHOST").cloned().unwrap_or_default();
                     writeup::log_command(self.active_room.as_ref(), &target, &title, "crack", &cmd);
                 }
+                let job_id = job.id;
                 self.runs.push(job);
-                self.cracks.push(PendingCrack { title, hash: c.hash.clone(), out: out_file, john: matches!(tool, CrackTool::John(_)) });
+                self.cracks.push(PendingCrack { job_id, title, hash: c.hash.clone(), out: out_file, john: matches!(tool, CrackTool::John(_)) });
                 self.run_tab = self.runs.len() - 1;
                 self.show_run = true;
                 self.mode = Mode::Normal;
@@ -1954,7 +2034,7 @@ impl App {
         }
         let mut still = Vec::new();
         for p in std::mem::take(&mut self.cracks) {
-            match self.runs.iter().find(|j| j.title == p.title) {
+            match self.runs.iter().find(|j| j.id == p.job_id) {
                 Some(j) if j.is_running() => still.push(p),
                 Some(_) => self.finish_crack(&p),
                 None => {} // tab closed before it finished
@@ -2282,4 +2362,106 @@ fn derive_categories(commands: &[Command]) -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Point the selection at `category/name`.
+    fn select(app: &mut App, key: &str) {
+        let ci = app.command_by_key(key).unwrap_or_else(|| panic!("no command {key}"));
+        let cat = app.commands[ci].category.clone();
+        app.cat_idx = app.categories.iter().position(|c| *c == cat).unwrap();
+        app.cmd_idx = app.visible().iter().position(|&i| i == ci).unwrap();
+        assert_eq!(app.selected_cmd().map(cmd_key).as_deref(), Some(key));
+    }
+
+    #[test]
+    fn x_refuses_target_side_commands() {
+        let mut app = App::for_tests();
+        for (k, v) in [("LHOST", "10.10.14.2"), ("LPORT", "4444"), ("FILE", "x"), ("RHOST", "10.10.10.10")] {
+            app.vars.insert(k.into(), v.into());
+        }
+        for key in ["shells/bash tcp", "misc/sudo -l", "misc/linpeas pull+run", "win/winpeas pull+run", "upgrade/python pty spawn"] {
+            select(&mut app, key);
+            app.run_selected();
+            assert!(app.runs.is_empty(), "{key} was spawned");
+            assert!(app.status.contains(TARGET_SIDE_MSG), "{key}: status {:?}", app.status);
+        }
+        // and spawn_cmd (used by recipes) refuses on its own
+        let c = app.commands[app.command_by_key("misc/find SUID").unwrap()].clone();
+        assert_eq!(app.spawn_cmd(&c), 0);
+        assert!(app.runs.is_empty());
+    }
+
+    #[test]
+    fn recipes_skip_target_side_steps() {
+        let mut app = App::for_tests();
+        let r = crate::recipe::Recipe {
+            name: "evil".into(),
+            description: String::new(),
+            ports: vec![],
+            services: vec![],
+            steps: vec!["misc/sudo -l".into(), "shells/busybox nc".into()],
+        };
+        app.run_recipes(&[r]);
+        assert!(app.runs.is_empty());
+        assert!(app.status.contains("target-side"), "status {:?}", app.status);
+    }
+
+    #[test]
+    fn rerun_refuses_restored_target_tab() {
+        let mut app = App::for_tests();
+        app.runs.push(RunJob::restored("sudo -l", "sudo -l", None, "", false, Some(0), 6, 30));
+        app.run_tab = 0;
+        app.run_rerun_active();
+        assert!(app.status.contains(TARGET_SIDE_MSG));
+        assert!(app.runs[0].restored.is_some(), "tab was replaced by a new run");
+    }
+
+    #[test]
+    fn quit_asks_while_jobs_run() {
+        let mut app = App::for_tests();
+        app.request_quit();
+        assert!(app.should_quit && !app.confirm_quit, "idle: quits at once");
+
+        let mut app = App::for_tests();
+        app.runs.push(RunJob::spawn("sleep", "sleep 5", 6, 30, None).unwrap());
+        app.request_quit();
+        assert!(app.confirm_quit && !app.should_quit);
+        app.answer_quit(false);
+        assert!(!app.confirm_quit && !app.should_quit);
+        app.request_quit();
+        app.answer_quit(true);
+        assert!(app.should_quit);
+        app.runs[0].kill();
+    }
+
+    #[test]
+    fn crack_poll_follows_job_id_not_title() {
+        let mut app = App::for_tests();
+        let title = "crack admin (NTLM)";
+        // an old, finished tab with the same title is still open
+        let mut old = RunJob::restored(title, "hashcat …", None, "", false, Some(1), 6, 30);
+        old.finished = true;
+        app.runs.push(old);
+        let retry = RunJob::spawn(title, "sleep 5", 6, 30, None).unwrap();
+        let id = retry.id;
+        app.runs.push(retry);
+        app.cracks.push(PendingCrack {
+            job_id: id,
+            title: title.into(),
+            hash: "31d6cfe0d16ae931b73c59d7e0c089c0".into(),
+            out: std::env::temp_dir().join("pivt-test-nonexistent.out"),
+            john: false,
+        });
+        app.poll_cracks();
+        assert_eq!(app.cracks.len(), 1, "retry resolved against the old tab");
+        assert_eq!(app.cracks[0].job_id, id);
+        // the retry tab closing drops it
+        app.runs.pop();
+        app.poll_cracks();
+        assert!(app.cracks.is_empty());
+    }
 }

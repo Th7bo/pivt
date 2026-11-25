@@ -89,10 +89,7 @@ impl RunJob {
                             }
                             if let Ok(mut r) = rawc.lock() {
                                 r.push_str(&strip_ansi(&String::from_utf8_lossy(&buf[..n])));
-                                if r.len() > MAX_RAW {
-                                    let cut = r.len() - MAX_RAW;
-                                    *r = r.split_off(cut);
-                                }
+                                trim_front(&mut r, MAX_RAW);
                             }
                         }
                         Err(_) => break,
@@ -266,6 +263,19 @@ impl Drop for RunJob {
     }
 }
 
+/// Drop bytes from the front of `s` so it's at most ~`max` bytes, cutting on
+/// a char boundary (a raw byte cut would panic mid UTF-8 sequence).
+fn trim_front(s: &mut String, max: usize) {
+    if s.len() <= max {
+        return;
+    }
+    let mut cut = s.len() - max;
+    while !s.is_char_boundary(cut) {
+        cut += 1;
+    }
+    s.drain(..cut);
+}
+
 fn to_io<E: std::fmt::Display>(e: E) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
 }
@@ -362,6 +372,28 @@ mod tests {
     }
 
     #[test]
+    fn raw_pty_passes_ctrl_c_through() {
+        // cooked PTY: ^C kills the program (what used to kill caught shells)
+        let mut cooked = RunJob::spawn("t", "cat", 6, 30, None).expect("spawn");
+        std::thread::sleep(Duration::from_millis(200));
+        cooked.write_input(b"\x03");
+        // raw PTY (listener commands): ^C is just a byte for the program
+        let raw_cmd = format!("{}cat", crate::model::RAW_PTY_PREFIX);
+        let mut raw = RunJob::spawn("t", raw_cmd, 6, 30, None).expect("spawn");
+        std::thread::sleep(Duration::from_millis(300));
+        raw.write_input(b"\x03\x1aalive\r");
+        for _ in 0..20 {
+            cooked.poll();
+            raw.poll();
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(cooked.finished, "^C should end cat in a cooked pty");
+        assert!(raw.is_running(), "^C/^Z killed or stopped the raw-pty job");
+        assert!(screen_text(&raw).contains("alive"), "input not passed through:\n{}", screen_text(&raw));
+        raw.kill();
+    }
+
+    #[test]
     fn exit_code_captured() {
         let mut j = RunJob::spawn("t", "exit 3", 6, 20, None).expect("spawn");
         for _ in 0..40 {
@@ -372,6 +404,40 @@ mod tests {
             std::thread::sleep(Duration::from_millis(25));
         }
         assert_eq!(j.exit, Some(3));
+    }
+
+    #[test]
+    fn trim_front_respects_char_boundaries() {
+        // every cut point lands inside some multibyte char at least once
+        for max in 0..12 {
+            let mut s = "a✦bé🔓c✦".repeat(3);
+            trim_front(&mut s, max);
+            assert!(s.len() <= max, "max {max}: {s:?}");
+            assert!("a✦bé🔓c✦".repeat(3).ends_with(&s));
+        }
+        let mut s = "ok".to_string();
+        trim_front(&mut s, 10);
+        assert_eq!(s, "ok");
+    }
+
+    #[test]
+    fn multibyte_output_past_raw_cap() {
+        // > MAX_RAW of 3-byte chars, odd-sized chunks: the reader must keep
+        // going (no panic, no poisoned lock) and the child must exit.
+        let cmd = "i=0; while [ $i -lt 120 ]; do printf '✦%.0s' $(seq 1 1001); i=$((i+1)); done; echo done-✦";
+        let mut j = RunJob::spawn("t", cmd, 6, 40, None).expect("spawn");
+        for _ in 0..400 {
+            j.poll();
+            if j.finished && j.eof.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(j.finished, "child did not exit");
+        assert!(j.raw.lock().is_ok(), "raw lock poisoned");
+        let raw = j.raw_text();
+        assert!(raw.len() <= MAX_RAW && raw.len() > MAX_RAW / 2, "len {}", raw.len());
+        assert!(raw.contains("done-✦"), "tail missing");
     }
 
     #[test]

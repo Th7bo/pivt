@@ -40,6 +40,11 @@ impl Pinger {
         Pinger { state, target }
     }
 
+    /// A pinger with no background thread (headless snapshots, tests).
+    pub fn idle() -> Pinger {
+        Pinger { state: Arc::new(Mutex::new(Ping::default())), target: Arc::new(Mutex::new(String::new())) }
+    }
+
     pub fn set_target(&self, host: &str) {
         if let Ok(mut g) = self.target.lock() {
             *g = host.to_string();

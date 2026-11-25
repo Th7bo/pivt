@@ -53,7 +53,8 @@ fn main() -> io::Result<()> {
 /// Never loads or saves the persistent session, so screenshots stay clean.
 fn snapshot(what: &str) {
     use ratatui::backend::TestBackend;
-    let mut app = App::new();
+    // no Discord / ping threads: a snapshot must exit right away
+    let mut app = App::headless();
     app.tick = 60;
     match what {
         s if s.starts_with("splash:") => {
@@ -270,16 +271,25 @@ fn snapshot(what: &str) {
 }
 
 /// Suspend the TUI, run $EDITOR on a file, then restore the TUI.
+/// `mouse_on`: mouse capture is currently enabled (turned off for the editor,
+/// or its escape sequences land in the file, then back on).
 fn edit_in_external(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     path: &std::path::Path,
+    mouse_on: bool,
 ) -> io::Result<()> {
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".into());
     disable_raw_mode()?;
+    if mouse_on {
+        execute!(terminal.backend_mut(), DisableMouseCapture)?;
+    }
     execute!(terminal.backend_mut(), DisableBracketedPaste, LeaveAlternateScreen)?;
     let status = std::process::Command::new(&editor).arg(path).status();
     enable_raw_mode()?;
     execute!(terminal.backend_mut(), EnterAlternateScreen, EnableBracketedPaste)?;
+    if mouse_on {
+        execute!(terminal.backend_mut(), EnableMouseCapture)?;
+    }
     terminal.clear()?;
     if status.is_err() {
         // best-effort; the next draw shows a message if needed
@@ -309,11 +319,20 @@ fn restore(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> 
     Ok(())
 }
 
-/// On panic, put the terminal back (raw mode off, alt screen, mouse, paste)
-/// before the default hook prints the message, so the shell isn't left broken.
+/// On a main-thread panic, put the terminal back (raw mode off, alt screen,
+/// mouse, paste) before the default hook prints the message, so the shell
+/// isn't left broken. Background threads (discord/htb/ping/readers) catch
+/// their own panics and the UI keeps running, so for those the terminal is
+/// left alone and the message is only written to a log file (stderr would
+/// scribble over the TUI).
 fn install_panic_hook() {
     let default = std::panic::take_hook();
+    let main_id = std::thread::current().id();
     std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().id() != main_id {
+            log_thread_panic(&info.to_string());
+            return;
+        }
         let _ = disable_raw_mode();
         let _ = execute!(
             io::stdout(),
@@ -324,6 +343,17 @@ fn install_panic_hook() {
         );
         default(info);
     }));
+}
+
+/// Append a background thread's panic message to ~/.config/pivt/panic.log.
+fn log_thread_panic(msg: &str) {
+    use std::io::Write;
+    let name = std::thread::current().name().unwrap_or("unnamed").to_string();
+    let dir = model::config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("panic.log")) {
+        let _ = writeln!(f, "[{}] thread '{name}': {msg}", discord::now_unix());
+    }
 }
 
 fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::Result<()> {
@@ -364,7 +394,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::
             }
         }
         if let Some(path) = app.pending_editor.take() {
-            edit_in_external(terminal, &path)?;
+            edit_in_external(terminal, &path, mouse_on)?;
             last_tick = Instant::now();
         }
         if last_tick.elapsed() >= tick_rate {
@@ -375,6 +405,11 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
+    // the quit prompt swallows the next key: y quits, anything else cancels
+    if app.confirm_quit {
+        app.answer_quit(matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')));
+        return;
+    }
     // interacting with a job's PTY: keystrokes go to the program.
     // Detach with F12 (layout-independent; Ctrl-] also works on QWERTY).
     if app.mode == Mode::Normal && app.focus == Focus::Run && app.interacting {
@@ -389,9 +424,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         }
         return;
     }
-    // global: ctrl-c always quits
+    // global: ctrl-c quits (asking first while jobs are running)
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-        app.should_quit = true;
+        app.request_quit();
         return;
     }
     match app.mode {
@@ -420,7 +455,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 /// Route a bracketed paste to whatever is taking text input right now. Never
 /// replays it as keystrokes: with no text field active the paste is dropped.
 fn handle_paste(app: &mut App, text: &str) {
-    if text.is_empty() {
+    if text.is_empty() || app.confirm_quit {
         return;
     }
     // interacting with a job: hand the paste to the program in the PTY
@@ -705,13 +740,13 @@ fn normal_keys(app: &mut App, key: KeyEvent) {
         return;
     }
     match key.code {
-        KeyCode::Char('q') => app.should_quit = true,
+        KeyCode::Char('q') => app.request_quit(),
         KeyCode::Esc => {
             if !app.search.is_empty() {
                 app.search.clear();
                 app.after_mutation();
             } else {
-                app.should_quit = true;
+                app.request_quit();
             }
         }
         KeyCode::Char('x') => app.run_selected(),

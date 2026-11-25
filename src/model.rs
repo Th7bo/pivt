@@ -16,12 +16,60 @@ pub struct Command {
     /// `template` stays the primary/copyable line; `steps` drives the runner.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<String>,
+    /// Where the command is meant to run. `target` = on the victim (reverse
+    /// shells, privesc enum, download one-liners): pivt copies it but never
+    /// runs it locally with `x`.
+    #[serde(default, skip_serializing_if = "Side::is_local")]
+    pub side: Side,
+    /// Run in a raw PTY (listeners): Ctrl-C/Ctrl-Z go to the remote shell as
+    /// bytes instead of killing/stopping the local listener.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub raw_pty: bool,
     /// true if it came from the user's commands.toml (editable/removable)
     #[serde(skip)]
     pub user: bool,
 }
 
+/// Which machine a command is meant to run on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Side {
+    /// Your own box (the default).
+    #[default]
+    #[serde(alias = "attacker")]
+    Local,
+    /// The victim: paste it into a shell on the box.
+    #[serde(alias = "victim")]
+    Target,
+}
+
+impl Side {
+    pub fn is_local(&self) -> bool {
+        *self == Side::Local
+    }
+}
+
+/// Status shown when `x` (or a recipe) refuses a target-side command.
+pub const TARGET_SIDE_MSG: &str = "target-side: copy it (⏎) and run it in your shell on the box";
+
+/// Prefix that puts the job's PTY in raw mode so control keys reach the
+/// remote shell. `icrnl` keeps Enter working in a not-yet-upgraded shell.
+pub const RAW_PTY_PREFIX: &str = "stty raw -echo icrnl 2>/dev/null; ";
+
 impl Command {
+    pub fn is_target(&self) -> bool {
+        self.side == Side::Target
+    }
+
+    /// Wrap an already-filled step for the runner (raw PTY for listeners).
+    pub fn wrap_for_run(&self, filled: &str) -> String {
+        if self.raw_pty {
+            format!("{RAW_PTY_PREFIX}{filled}")
+        } else {
+            filled.to_string()
+        }
+    }
+
     /// Lines to run: the explicit `steps`, else the single `template`.
     pub fn run_steps(&self) -> Vec<String> {
         if self.steps.is_empty() {
@@ -271,6 +319,81 @@ mod tests {
         let back: Config = toml::from_str(&txt).unwrap();
         assert_eq!(back.favorites, vec!["nmap/Quick".to_string()]);
         assert_eq!(back.vars.get("RHOST").unwrap(), "10.0.0.1");
+    }
+
+    #[test]
+    fn bundled_victim_commands_are_target_side() {
+        let all = parse_commands(BUNDLED, false);
+        let key = |c: &Command| format!("{}/{}", c.category, c.name);
+        // whole categories that only make sense inside a shell on the box
+        for c in all.iter().filter(|c| ["upgrade", "win"].contains(&c.category.as_str())) {
+            assert!(c.is_target(), "{} should be side = \"target\"", key(c));
+        }
+        // shells: everything that connects back to LHOST is a payload
+        // (msfvenom only builds one locally)
+        for c in all.iter().filter(|c| c.category == "shells") {
+            let payload = c.template.contains("<LHOST>") && !c.template.starts_with("msfvenom");
+            assert_eq!(c.is_target(), payload, "{} side", key(c));
+        }
+        // anything that looks like a payload, privesc enum or a victim-side pull
+        let victim = [
+            "/dev/tcp/", "mkfifo", "-e /bin/sh", "pty.spawn", "linpeas", "winPEAS", "sudo -l",
+            "-perm -4000", "find / -writable", "certutil", "Invoke-WebRequest", "iwr ", "fsockopen",
+            "TCPClient", "wget http://<LHOST>", "curl http://<LHOST>",
+        ];
+        for c in &all {
+            let t = c.run_steps().join("\n");
+            if victim.iter().any(|v| t.contains(v)) {
+                assert!(c.is_target(), "{} looks victim-side but isn't marked", key(c));
+            }
+        }
+        // listeners stay local and get a raw PTY
+        for name in ["nc listener", "rlwrap listener"] {
+            let c = all.iter().find(|c| c.category == "shells" && c.name == name).unwrap();
+            assert!(!c.is_target() && c.raw_pty, "{name}");
+            assert!(c.description.contains("penelope") && c.description.contains("pwncat"));
+        }
+        // and the attacker basics are still runnable
+        for k in ["nmap/Quick top-ports", "transfer/python http server", "pivot/chisel server", "misc/add /etc/hosts"] {
+            let c = all.iter().find(|c| key(c) == k).unwrap();
+            assert!(!c.is_target(), "{k}");
+        }
+    }
+
+    #[test]
+    fn side_parses_and_roundtrips() {
+        let txt = r#"
+[[command]]
+category = "x"
+name = "a"
+template = "id"
+side = "target"
+
+[[command]]
+category = "x"
+name = "b"
+template = "id"
+side = "attacker"
+
+[[command]]
+category = "x"
+name = "c"
+template = "nc -lvnp 1"
+raw_pty = true
+"#;
+        let mut cs = parse_commands(txt, true);
+        assert_eq!(cs.iter().map(|c| c.side).collect::<Vec<_>>(), vec![Side::Target, Side::Local, Side::Local]);
+        assert!(cs[2].raw_pty && !cs[0].raw_pty);
+        assert_eq!(cs[2].wrap_for_run("nc -lvnp 1"), format!("{RAW_PTY_PREFIX}nc -lvnp 1"));
+        assert_eq!(cs[0].wrap_for_run("id"), "id");
+        // serialized form keeps target/raw_pty, omits defaults
+        cs[1].side = Side::Local;
+        let out = toml::to_string_pretty(&CommandFileOut { commands: cs.iter().collect() }).unwrap();
+        assert_eq!(out.matches("side = \"target\"").count(), 1, "{out}");
+        assert_eq!(out.matches("raw_pty = true").count(), 1, "{out}");
+        assert!(!out.contains("local"), "{out}");
+        let back = parse_commands(&out, true);
+        assert!(back[0].is_target() && back[2].raw_pty);
     }
 
     #[test]
