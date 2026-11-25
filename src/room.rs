@@ -12,6 +12,55 @@ pub fn now(fmt: &str) -> String {
         .unwrap_or_default()
 }
 
+/// A public CTF platform a room belongs to. Only rooms known to be on one
+/// get their name and link shown in the safe Discord presence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    Htb,
+    Thm,
+}
+
+impl Platform {
+    pub fn label(self) -> &'static str {
+        match self {
+            Platform::Htb => "HTB",
+            Platform::Thm => "THM",
+        }
+    }
+    fn key(self) -> &'static str {
+        match self {
+            Platform::Htb => "htb",
+            Platform::Thm => "thm",
+        }
+    }
+    /// Public page for a box/room of this name.
+    pub fn url(self, name: &str) -> String {
+        let slug: String = name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            .collect();
+        match self {
+            Platform::Htb => format!("https://app.hackthebox.com/machines/{slug}"),
+            Platform::Thm => format!("https://tryhackme.com/room/{}", slug.to_ascii_lowercase()),
+        }
+    }
+}
+
+/// `platform = "htb"` (or thm) from a `.ctfroom` marker's contents.
+pub fn parse_platform(marker: &str) -> Option<Platform> {
+    marker.lines().find_map(|l| {
+        let (k, v) = l.split_once('=')?;
+        if k.trim() != "platform" {
+            return None;
+        }
+        match v.trim().trim_matches('"').to_ascii_lowercase().as_str() {
+            "htb" | "hackthebox" => Some(Platform::Htb),
+            "thm" | "tryhackme" => Some(Platform::Thm),
+            _ => None,
+        }
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct Room {
     pub name: String,
@@ -43,6 +92,15 @@ impl Room {
             format!("{ip} {host}\n")
         };
         let _ = std::fs::write(self.target_file(), line);
+    }
+    /// Platform recorded in the room's `.ctfroom` marker, if any.
+    pub fn platform(&self) -> Option<Platform> {
+        std::fs::read_to_string(self.path.join(".ctfroom")).ok().as_deref().and_then(parse_platform)
+    }
+    /// Record (or clear) the room's platform in its `.ctfroom` marker.
+    pub fn set_platform(&self, p: Option<Platform>) -> std::io::Result<()> {
+        let body = p.map(|p| format!("platform = \"{}\"\n", p.key())).unwrap_or_default();
+        std::fs::write(self.path.join(".ctfroom"), body)
     }
     /// First few non-empty note lines, for a preview.
     pub fn notes_preview(&self, max: usize) -> Vec<String> {
@@ -162,5 +220,24 @@ mod tests {
         let names: Vec<_> = list_rooms(&root).into_iter().map(|r| r.name).collect();
         assert!(names.contains(&"a".to_string()) && names.contains(&"b".to_string()));
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn platform_marker_roundtrip() {
+        assert_eq!(parse_platform(""), None);
+        assert_eq!(parse_platform("platform = \"htb\"\n"), Some(Platform::Htb));
+        assert_eq!(parse_platform("platform=THM"), Some(Platform::Thm));
+        assert_eq!(parse_platform("platform = \"corp\""), None);
+        let dir = std::env::temp_dir().join(format!("pivt-plat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let r = Room { name: "Blue".into(), path: dir.clone() };
+        r.set_platform(Some(Platform::Thm)).unwrap();
+        assert_eq!(r.platform(), Some(Platform::Thm));
+        r.set_platform(None).unwrap();
+        assert_eq!(r.platform(), None);
+        assert_eq!(Platform::Thm.url("Blue"), "https://tryhackme.com/room/blue");
+        assert_eq!(Platform::Htb.url("Lame"), "https://app.hackthebox.com/machines/Lame");
+        assert_eq!(Platform::Htb.url("a b/../c"), "https://app.hackthebox.com/machines/ab..c");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

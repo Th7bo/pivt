@@ -121,6 +121,10 @@ pub struct Config {
     /// URL for the "get pivt" presence button; empty = [`REPO_URL`].
     #[serde(default)]
     pub discord_link: String,
+    /// How much the presence reveals: "safe" (default), "full" or "minimal".
+    /// A string so a typo falls back to safe instead of failing the parse.
+    #[serde(default)]
+    pub discord_privacy: String,
     /// Where rooms live; empty = $CTF_ROOT, else ~/TryHackMe if it exists,
     /// else $XDG_DATA_HOME/pivt/rooms. `$CTF_ROOT` beats this setting.
     #[serde(default, skip_serializing_if = "String::is_empty")]

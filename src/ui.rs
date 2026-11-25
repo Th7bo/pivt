@@ -41,7 +41,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     match app.mode {
         Mode::Vars => draw_vars(f, app),
         Mode::Add => draw_add(f, app),
-        Mode::Help => draw_help(f),
+        Mode::Help => draw_help(f, app),
         Mode::Rooms => draw_rooms(f, app),
         Mode::NewRoom => draw_newroom(f, app),
         Mode::Note => draw_note(f, app),
@@ -781,7 +781,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Mode::Add => &[("⇥", "field"), ("^s", "save"), ("esc", "cancel")],
         Mode::Help => &[("esc", "close")],
         Mode::Splash => &[],
-        Mode::Rooms => &[("↑↓", "move"), ("⏎", "activate"), ("n", "new"), ("o", "notes"), ("esc", "close")],
+        Mode::Rooms => &[("↑↓", "move"), ("⏎", "activate"), ("n", "new"), ("o", "notes"), ("p", "thm/htb"), ("esc", "close")],
         Mode::Note => &[("type", "note"), ("⏎", "save"), ("esc", "cancel")],
         Mode::NewRoom => &[("⇥", "field"), ("^s", "create"), ("esc", "cancel")],
         Mode::Loot => &[("↑↓", "move"), ("⏎", "use vars"), ("y", "copy pass"), ("Y/U", "hash/user"), ("c", "crack"), ("a", "add"), ("d", "del"), ("esc", "close")],
@@ -1499,6 +1499,10 @@ fn draw_rooms(f: &mut Frame, app: &App) {
             } else {
                 Span::styled("· ", Style::default().fg(DIM))
             };
+            let tag = r
+                .platform()
+                .map(|p| Span::styled(format!(" {}", p.label().to_lowercase()), Style::default().fg(DIM)))
+                .unwrap_or_else(|| Span::raw(""));
             ListItem::new(Line::from(vec![
                 mark,
                 dot,
@@ -1508,6 +1512,7 @@ fn draw_rooms(f: &mut Frame, app: &App) {
                         .fg(if sel { FG } else { Color::Rgb(0xb0, 0xbc, 0xc9) })
                         .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
                 ),
+                tag,
             ]))
         })
         .collect();
@@ -1773,8 +1778,8 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn draw_help(f: &mut Frame) {
-    let area = centered(f.area(), 62, 32);
+fn draw_help(f: &mut Frame, app: &App) {
+    let area = centered(f.area(), 66, 32);
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1807,7 +1812,11 @@ fn draw_help(f: &mut Frame) {
         row("e", "edit variables (split: this cmd / all)"),
         row("f", "pin ★ favorite (shows ★/⏱ categories)"),
         row("b", "toggle background: starfield ↔ flow field"),
-        row("D", "toggle Discord Rich Presence"),
+        row("D / M", &format!(
+            "Discord presence {} · M cycles privacy: {}",
+            if app.discord_rpc { "on" } else { "off" },
+            app.discord_privacy.as_str()
+        )),
         row("a / d", "add / delete a command"),
         row("/", "fuzzy search across all commands"),
         row("q / esc", "quit"),
@@ -1817,14 +1826,14 @@ fn draw_help(f: &mut Frame) {
         row("z", "zoom the run tab fullscreen (bigger PTY)"),
         row("K / d / r", "kill job / close tab / re-run (restored too)"),
         Line::from(Span::styled(" ctf rooms + writeup", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD))),
-        row("c", "rooms: pick/activate, n=new, o=notes"),
+        row("c", "rooms: ⏎ use · n new · o notes · p mark thm/htb"),
         row("L", "loot: creds · ⏎ load vars · c crack hash"),
         row("g", "GTFOBins privesc lookup (offline)"),
         row("w", "add a writeup note to the log"),
         row("F / E", "capture flag → notes · export writeup.md"),
         row("o", "open active room's notes in $EDITOR"),
         Line::from(Span::styled(
-            "  copies auto-log to the room · RHOST → sync_target_file (if set).",
+            "  copies auto-log to the room · RHOST → sync_target_file (if on)",
             Style::default().fg(DIM),
         )),
         Line::from(Span::styled(

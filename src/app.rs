@@ -1,4 +1,4 @@
-use crate::discord::{DiscordRpc, Presence};
+use crate::discord::{DiscordRpc, PresenceInput, Privacy};
 
 /// Ticks (~50ms each) between rotating the presence text lines. ~15s keeps us
 /// well inside Discord's 5-updates-per-20s rate limit.
@@ -295,6 +295,8 @@ pub struct App {
     pub discord_app_id: String,
     /// Optional project URL for the "get pivt" presence button.
     pub discord_link: String,
+    /// What the presence may reveal (config `discord_privacy`, `M` cycles).
+    pub discord_privacy: Privacy,
     last_rpc_tick: u64,
 
     /// Rooms dir / template / target mirror, resolved from config + env.
@@ -488,6 +490,7 @@ impl App {
             discord_rpc,
             discord_app_id,
             discord_link: cfg.discord_link.clone(),
+            discord_privacy: Privacy::parse(&cfg.discord_privacy),
             last_rpc_tick: 0,
             paths,
             path_cfg,
@@ -563,95 +566,52 @@ impl App {
     ///
     /// Discord only shows two text lines, so each line rotates through every
     /// candidate that currently has something to say (one step per
-    /// [`RPC_ROTATE_TICKS`]). A line with a single candidate stays put.
+    /// [`RPC_ROTATE_TICKS`]). What gets in at all depends on
+    /// [`Self::discord_privacy`]; see [`crate::discord::build_presence`].
     fn push_discord(&self) {
         let Some(d) = &self.discord else { return };
-        let plural = |n: usize| if n == 1 { "" } else { "s" };
+        d.update(crate::discord::build_presence(&self.presence_input(), self.discord_privacy));
+    }
 
-        // top line candidates
-        let mut details = vec![match &self.active_room {
-            Some(r) => format!("{} · {} flag{}", r.name, self.flags_captured, plural(self.flags_captured)),
-            None => "browsing commands".to_string(),
-        }];
-        let running = self.runs.iter().filter(|j| j.is_running()).count();
-        if running > 0 {
-            details.push(format!("⚡ {running} job{} running", plural(running)));
-        }
-        if !self.loot.is_empty() {
-            let n = self.loot.len();
-            details.push(format!("🔑 {n} cred{} looted", plural(n)));
-        }
-        if let Some(cat) = self.current_category() {
-            let (glyph, _) = crate::theme::category_style(cat);
-            details.push(format!("{glyph} in {cat}"));
-        }
+    /// Everything the presence could show, before the privacy filter.
+    fn presence_input(&self) -> PresenceInput {
         let htb = self.htb.snapshot();
-        if let Some(m) = &htb.machine {
+        let htb_line = htb.machine.as_ref().map(|m| {
             let mut line = format!("HTB {} · {}", m.name, m.difficulty);
             let guided: Vec<_> = htb.tasks.iter().filter(|t| t.kind == crate::htb::TaskKind::Task).collect();
             if !guided.is_empty() {
                 let done = guided.iter().filter(|t| t.completed).count();
                 line.push_str(&format!(" · {done}/{} tasks", guided.len()));
             }
-            details.push(line);
-        }
-
-        // bottom line candidates
-        let rhost = self.vars.get("RHOST").cloned().unwrap_or_default();
-        let mut states = vec![if rhost.is_empty() {
-            "no target set".to_string()
-        } else {
-            let status = match self.ping().up {
-                Some(true) => "up",
-                Some(false) => "down",
-                None => "…",
-            };
-            let mut s = format!("◎ {rhost} {status}");
-            if let Some(el) = self.box_elapsed() {
-                s.push_str(&format!(" · ⏱ {el}"));
-            }
-            s
-        }];
-        if let Some(ports) = self.vars.get("PORTS").filter(|p| !p.trim().is_empty()) {
-            let mut line = format!("open ports {ports}");
-            if line.chars().count() > 120 {
-                line = line.chars().take(119).collect::<String>() + "…";
-            }
-            states.push(line);
-        }
-
-        let step = (self.tick / RPC_ROTATE_TICKS) as usize;
-        let details = details[step % details.len()].clone();
-        let state = states[step % states.len()].clone();
-
-        // buttons (max 2)
-        let mut buttons = Vec::new();
-        if let Some(r) = &self.active_room {
-            buttons.push(("view room".to_string(), format!("https://tryhackme.com/room/{}", r.name)));
-        }
-        let link = self.discord_link.trim();
-        let link = if link.is_empty() { crate::model::REPO_URL } else { link };
-        buttons.push(("get pivt".to_string(), link.to_string()));
-
-        // small badge = current category's glyph, served from the repo
-        let (small_image, small_text) = match self.current_category() {
-            Some(cat) => {
-                let file = if crate::theme::has_category_style(cat) { cat } else { "default" };
-                (format!("{PRESENCE_IMG_BASE}/{file}.png"), cat.to_string())
-            }
-            None => (String::new(), String::new()),
-        };
-
-        d.update(Presence {
-            details,
-            state,
-            start_epoch: self.box_epoch,
-            large_image: "pivt".to_string(),
-            large_text: "pivt — ctf toolkit".to_string(),
-            small_image,
-            small_text,
-            buttons,
+            line
         });
+        let public_box = crate::discord::public_box(
+            self.active_room.as_ref().map(|r| (r.name.as_str(), r.platform())),
+            htb.machine.as_ref().map(|m| m.name.as_str()),
+        );
+        // small badge = current category's glyph, served from the repo
+        let badge = self.current_category().map(|cat| {
+            let file = if crate::theme::has_category_style(cat) { cat } else { "default" };
+            (format!("{PRESENCE_IMG_BASE}/{file}.png"), cat.to_string())
+        });
+        let link = self.discord_link.trim();
+        PresenceInput {
+            room: self.active_room.as_ref().map(|r| r.name.clone()),
+            public_box,
+            flags: self.flags_captured,
+            running_jobs: self.runs.iter().filter(|j| j.is_running()).count(),
+            loot: self.loot.len(),
+            category: self.current_category().map(str::to_string),
+            badge,
+            htb_line,
+            rhost: self.vars.get("RHOST").cloned().unwrap_or_default(),
+            rhost_up: self.ping().up,
+            elapsed: self.box_elapsed(),
+            ports: self.vars.get("PORTS").cloned().unwrap_or_default(),
+            start_epoch: self.box_epoch,
+            step: (self.tick / RPC_ROTATE_TICKS) as usize,
+            link: if link.is_empty() { crate::model::REPO_URL } else { link }.to_string(),
+        }
     }
 
     pub fn ping(&self) -> Ping {
@@ -830,12 +790,23 @@ impl App {
                     self.discord = Some(DiscordRpc::start(self.discord_app_id.clone()));
                 }
                 self.last_rpc_tick = 0; // push presence promptly
-                self.set_status("discord rich presence: on");
+                let m = self.discord_privacy;
+                self.set_status(format!("discord rich presence: on · {} ({}) · M cycles", m.as_str(), m.describe()));
             }
         } else {
             self.discord = None; // Drop clears the activity + closes the pipe
             self.set_status("discord rich presence: off");
         }
+    }
+
+    /// Cycle what the presence reveals: safe → full → minimal (persisted).
+    pub fn cycle_discord_privacy(&mut self) {
+        self.discord_privacy = self.discord_privacy.next();
+        self.persist_config();
+        self.last_rpc_tick = 0; // re-push now, so a downgrade takes effect at once
+        let m = self.discord_privacy;
+        let off = if self.discord_rpc { "" } else { " · presence is off (D)" };
+        self.set_status(format!("discord privacy: {} — {}{off}", m.as_str(), m.describe()));
     }
 
     // ── navigation ──
@@ -930,6 +901,7 @@ impl App {
             discord_rpc: self.discord_rpc,
             discord_app_id: self.discord_app_id.clone(),
             discord_link: self.discord_link.clone(),
+            discord_privacy: self.discord_privacy.as_str().to_string(),
             rooms_dir: self.path_cfg.0.clone(),
             room_template: self.path_cfg.1.clone(),
             sync_target_file: self.path_cfg.2.clone(),
@@ -1161,6 +1133,27 @@ impl App {
         }
         self.mode = Mode::Normal;
     }
+    /// Mark the highlighted room as a THM room, an HTB machine, or neither.
+    /// Only marked rooms are named in the safe Discord presence.
+    pub fn rooms_cycle_platform(&mut self) {
+        use crate::room::Platform;
+        let Some(r) = self.rooms.get(self.room_idx).cloned() else { return };
+        let next = match r.platform() {
+            None => Some(Platform::Thm),
+            Some(Platform::Thm) => Some(Platform::Htb),
+            Some(Platform::Htb) => None,
+        };
+        match r.set_platform(next) {
+            Ok(()) => {
+                self.last_rpc_tick = 0;
+                self.set_status(match next {
+                    Some(p) => format!("room '{}' marked {} (public box: named in Discord safe mode)", r.name, p.label()),
+                    None => format!("room '{}' unmarked (private: never named in Discord safe mode)", r.name),
+                });
+            }
+            Err(e) => self.set_status(format!("✗ couldn't mark room: {e}")),
+        }
+    }
     pub fn open_active_notes(&mut self) {
         if let Some(r) = &self.active_room {
             self.pending_editor = Some(r.notes_file());
@@ -1196,6 +1189,10 @@ impl App {
         let host = self.new_room.host.trim().to_string();
         match room::scaffold(&self.paths.rooms_dir, self.paths.room_template.as_deref(), name, &ip, &host) {
             Ok(r) => {
+                // named after the machine loaded in the HTB panel: it's that box
+                if self.htb.snapshot().machine.is_some_and(|m| m.name.eq_ignore_ascii_case(&r.name)) {
+                    let _ = r.set_platform(Some(crate::room::Platform::Htb));
+                }
                 self.leave_room_session();
                 self.active_room = Some(r.clone());
                 if !ip.is_empty() {

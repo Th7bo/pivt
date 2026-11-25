@@ -672,6 +672,7 @@ fn rooms_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Up | KeyCode::Char('k') => app.rooms_prev(),
         KeyCode::Enter => app.activate_selected_room(),
         KeyCode::Char('n') => app.new_room_open(),
+        KeyCode::Char('p') => app.rooms_cycle_platform(),
         KeyCode::Char('o') => {
             // open the highlighted room's notes
             if let Some(r) = app.rooms.get(app.room_idx) {
@@ -779,6 +780,7 @@ fn normal_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Char('f') => app.toggle_favorite(),
         KeyCode::Char('b') => app.toggle_bg(),
         KeyCode::Char('D') => app.toggle_discord(),
+        KeyCode::Char('M') => app.cycle_discord_privacy(),
         KeyCode::Char('g') => app.open_gtfo(),
         KeyCode::Char('P') => app.parse_scan(),
         KeyCode::Char('R') => app.open_recipes(),

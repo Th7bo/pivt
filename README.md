@@ -43,7 +43,9 @@ Screenshots are rendered headlessly:
 
 A room is a directory with a `.ctfroom` marker, holding `nmap/ loot/
 exploits/`, `notes.md`, the command log and job logs. `c` lists and activates
-rooms, `n` scaffolds one. Starting pivt inside a room activates it.
+rooms, `n` scaffolds one, `p` marks the highlighted room as a THM room or HTB
+machine (see [Discord](#discord-rich-presence)). Starting pivt inside a room
+activates it.
 
 Where rooms live, first match wins:
 
@@ -113,7 +115,8 @@ answer format and hints (hidden until you press `h`; hints don't cost points).
 - `m` load a machine by name; otherwise pivt loads your active machine (or the
   active room's name).
 - `s` / `t` spawn / stop the machine. Once it has an IP, `RHOST` follows it.
-- `r` refresh. The Discord presence shows `HTB <box> · <difficulty> · n/m tasks`.
+- `r` refresh. The Discord presence shows `HTB <box>` (`full` mode adds
+  difficulty and `n/m tasks`).
 
 Setup: Labs → avatar → Account Settings → **App Tokens** → create one, then
 
@@ -160,14 +163,23 @@ finishes, the plaintext is saved to the entry and loaded into `PASS`.
 
 ## Discord Rich Presence
 
-pivt can advertise what you're working on to Discord via Rich Presence:
+pivt can show what you're working on in Discord via Rich Presence. Anyone who
+can see your profile sees it, so by default it never names a target. Three
+privacy modes, set with `discord_privacy` in `config.toml` or cycled with
+**`M`** (Shift-m); the help overlay (`?`) shows the current one:
 
-- **details** — the active room name + flags captured (e.g. `DC-1 · 3 flags`),
-  or `browsing commands` when no room is active.
-- **state** — the current target with reachability and the box timer
-  (e.g. `◎ 10.10.11.42 up · ⏱ 12:34`).
-- an **elapsed timer** driven by the box start time.
-- a large image asset keyed `pivt` with the text `pivt — ctf toolkit`.
+| mode | shows |
+|---|---|
+| `safe` (default) | `HTB · Lame` / `THM · blue` for a known public box, else `on a box`; flag count on public boxes, running jobs, the box timer. Never an IP, ports, services, category or loot. |
+| `full` | everything: room + flags, `◎ 10.10.11.42 up · ⏱ 12:34`, open ports, looted creds, current category badge, HTB tasks |
+| `minimal` | just `pivt` |
+
+A box counts as public when the HTB panel (`H`) has a machine loaded and
+either no room is active, the room is named after that machine, or the room is
+marked HTB; or when the active room is marked THM or HTB. Mark a room with `p`
+in the rooms view (`c`): it writes `platform = "thm"` / `"htb"` into the
+room's `.ctfroom`. A new room named after the loaded HTB machine is marked
+automatically. Unmarked rooms are treated as private.
 
 It is **opt-in** and a silent no-op when Discord isn't running — the connection
 lives on a background thread and never blocks or crashes the UI.
@@ -178,6 +190,7 @@ Press **`D`** (Shift-D) in Normal mode, or set it in `~/.config/pivt/config.toml
 
 ```toml
 discord_rpc = true
+discord_privacy = "safe"   # or "full" / "minimal"
 ```
 
 The setting is persisted. pivt ships with its own Discord application
@@ -193,15 +206,18 @@ discord_app_id = "123456789012345678"
 ```
 
 The activity shows as **Competing in pivt**. Both text lines rotate about every
-15s through whatever has something to say: room + flags, running jobs, looted
-creds, current category (top), and target status, open ports (bottom).
+15s through whatever has something to say in the current mode.
 
 Buttons (Discord hides your own buttons from you; others see them):
 
-- **view room** links `https://tryhackme.com/room/<active room>` when a room is active.
-- **get pivt** links the repo (override with `discord_link = "https://…"`).
+- **view machine** / **view room** links the box's page
+  (`https://app.hackthebox.com/machines/<name>` or
+  `https://tryhackme.com/room/<name>`), only for a known public box in `safe`
+  or `full`. Unknown platform: no button.
+- **get pivt** links the repo (override with `discord_link = "https://…"`);
+  not shown in `minimal`.
 
-The small corner badge shows the current category's glyph in its TUI colour,
+In `full` mode the small corner badge shows the current category's glyph in its TUI colour,
 loaded from `assets/presence/<category>.png` in this repo (no Discord upload
 needed). Regenerate after adding a category to `theme.rs`:
 
