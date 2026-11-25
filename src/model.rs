@@ -635,6 +635,18 @@ raw_pty = true
     }
 
     #[test]
+    fn bundled_has_no_stale_literals() {
+        for c in parse_commands(BUNDLED, false) {
+            let t = c.run_steps().join("\n") + &c.template;
+            for bad in ["YOUR_", "tun0", "crackmapexec", "-p '<PASS>'", "'<PASS>'", "'<USER>"] {
+                assert!(!t.contains(bad), "{}/{} contains {bad:?}: {t}", c.category, c.name);
+            }
+        }
+        let recipes = include_str!("default_recipes.toml");
+        assert!(!recipes.contains("crackmapexec"));
+    }
+
+    #[test]
     fn bundled_parses() {
         let c = parse_commands(BUNDLED, false);
         assert!(c.len() > 40);

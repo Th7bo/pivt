@@ -12,7 +12,7 @@ tags = ["recon", "ports", "scan"]
 [[command]]
 category = "nmap"
 name = "Full TCP all-ports"
-description = "Every TCP port, then re-scan found ones with scripts"
+description = "Every TCP port, fast (P parses the result into PORTS)"
 template = "nmap -p- --min-rate 5000 -T4 <RHOST> -oN nmap/allports.txt"
 tags = ["recon", "ports", "full"]
 
@@ -83,8 +83,8 @@ tags = ["web", "scan"]
 [[command]]
 category = "web"
 name = "wpscan enumerate"
-description = "WordPress users + vulnerable plugins"
-template = "wpscan --url <URL> --enumerate u,vp,vt --api-token YOUR_TOKEN"
+description = "WordPress users + vulnerable plugins/themes (WPSCAN_TOKEN = free API token from wpscan.com)"
+template = "wpscan --url <URL> --enumerate u,vp,vt --api-token <WPSCAN_TOKEN>"
 tags = ["web", "wordpress"]
 
 [[command]]
@@ -139,10 +139,10 @@ tags = ["smb", "access"]
 
 [[command]]
 category = "smb"
-name = "crackmapexec shares"
-description = "Auth + list shares, spray-friendly"
-template = "crackmapexec smb <RHOST> -u <USER> -p <PASS> --shares"
-tags = ["smb", "cme", "ad"]
+name = "nxc shares"
+description = "netexec (ex-crackmapexec): auth + list shares"
+template = "nxc smb <RHOST> -u <USER> -p <PASS> --shares"
+tags = ["smb", "netexec", "nxc", "ad"]
 
 [[command]]
 category = "smb"
@@ -291,14 +291,14 @@ tags = ["transfer", "smb", "impacket"]
 category = "ad"
 name = "kerbrute users"
 description = "Validate usernames via Kerberos pre-auth"
-template = "kerbrute userenum -d <DOMAIN> --dc <RHOST> <WORDLIST>"
+template = "kerbrute userenum -d <DOMAIN> --dc <RHOST> <USERLIST>"
 tags = ["ad", "kerberos", "enum"]
 
 [[command]]
 category = "ad"
 name = "GetNPUsers (ASREP)"
 description = "AS-REP roastable users"
-template = "impacket-GetNPUsers <DOMAIN>/ -usersfile <WORDLIST> -dc-ip <RHOST> -no-pass"
+template = "impacket-GetNPUsers <DOMAIN>/ -usersfile <USERLIST> -dc-ip <RHOST> -no-pass"
 tags = ["ad", "asrep", "impacket"]
 
 [[command]]
@@ -504,7 +504,7 @@ tags = ["encode", "url"]
 [[command]]
 category = "nmap"
 name = "full → detail (-oA)"
-description = "all ports, then service scan the open ones (kit 'scan full')"
+description = "all TCP ports, saved as nmap/full.{nmap,gnmap,xml} (kit 'scan full')"
 template = "nmap -p- -T4 --min-rate 5000 -oA nmap/full <RHOST>"
 tags = ["recon", "ports", "oA"]
 
@@ -528,8 +528,8 @@ tags = ["recon", "fast", "ports"]
 [[command]]
 category = "nmap"
 name = "masscan all"
-description = "all TCP ports at high rate (needs root)"
-template = "sudo masscan -p1-65535 <RHOST> --rate 1000 -e tun0"
+description = "all TCP ports at high rate (needs root; IFACE = your VPN interface, e.g. tun0)"
+template = "sudo masscan -p1-65535 <RHOST> --rate 1000 -e <IFACE>"
 tags = ["recon", "fast"]
 
 # ── dns ──
@@ -652,8 +652,8 @@ tags = ["ad", "pth", "hash"]
 [[command]]
 category = "ad"
 name = "nxc smb spray"
-description = "netexec: validate creds across SMB"
-template = "nxc smb <RHOST> -u <USER> -p <PASS> --shares"
+description = "netexec: spray a user list x password list over SMB"
+template = "nxc smb <RHOST> -u <USERLIST> -p <WORDLIST> --continue-on-success"
 tags = ["ad", "netexec", "spray"]
 
 # ── web attack ──

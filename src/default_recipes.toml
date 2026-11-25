@@ -53,4 +53,4 @@ name = "ad with creds"
 description = "Once you have USER/PASS: kerberoast, BloodHound collection and a share check."
 ports = [88, 389]
 services = ["kerberos-sec", "ldap"]
-steps = ["ad/GetUserSPNs (kerberoast)", "ad/bloodhound-python", "smb/crackmapexec shares"]
+steps = ["ad/GetUserSPNs (kerberoast)", "ad/bloodhound-python", "smb/nxc shares"]
