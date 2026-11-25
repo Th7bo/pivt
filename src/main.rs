@@ -837,34 +837,67 @@ fn run_focus_keys(app: &mut App, key: KeyEvent) -> bool {
 fn encode_key(key: KeyEvent) -> Option<Vec<u8>> {
     use KeyCode::*;
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    // xterm modifier parameter: 1 + shift(1) + alt(2) + ctrl(4)
+    let m = 1 + shift as u8 + 2 * alt as u8 + 4 * ctrl as u8;
+    // CSI <final> keys (arrows/Home/End): ESC [ 1 ; m <final> when modified
+    let csi = |fin: char| {
+        if m > 1 {
+            format!("\x1b[1;{m}{fin}").into_bytes()
+        } else {
+            format!("\x1b[{fin}").into_bytes()
+        }
+    };
+    // ESC [ n ~ keys: ESC [ n ; m ~ when modified
+    let tilde = |n: u8| {
+        if m > 1 {
+            format!("\x1b[{n};{m}~").into_bytes()
+        } else {
+            format!("\x1b[{n}~").into_bytes()
+        }
+    };
+    // Alt+key = ESC prefix (what xterm's metaSendsEscape / most terminals do)
+    let meta = |mut b: Vec<u8>| {
+        if alt {
+            b.insert(0, 0x1b);
+        }
+        b
+    };
     match key.code {
+        // AltGr arrives as Ctrl+Alt on some terminals (AZERTY `| @ [ ] \ ^ ~ #`
+        // …): a non-alphanumeric char with both is typed text, not a chord
+        Char(c) if ctrl && alt && !c.is_ascii_alphanumeric() => Some(c.to_string().into_bytes()),
         Char(c) => {
-            if ctrl {
-                let b = (c as u8).to_ascii_uppercase();
-                if (0x40..=0x5f).contains(&b) {
-                    Some(vec![b & 0x1f])
+            let b = if ctrl {
+                let u = (c as u8).to_ascii_uppercase();
+                if c.is_ascii() && (0x40..=0x5f).contains(&u) {
+                    vec![u & 0x1f]
+                } else if c == ' ' || c == '2' {
+                    vec![0] // Ctrl-Space / Ctrl-@
                 } else {
-                    Some(c.to_string().into_bytes())
+                    c.to_string().into_bytes()
                 }
             } else {
-                Some(c.to_string().into_bytes())
-            }
+                c.to_string().into_bytes()
+            };
+            Some(meta(b))
         }
-        Enter => Some(vec![b'\r']),
-        Backspace => Some(vec![0x7f]),
-        Tab => Some(vec![b'\t']),
-        BackTab => Some(b"\x1b[Z".to_vec()),
-        Esc => Some(vec![0x1b]),
-        Left => Some(b"\x1b[D".to_vec()),
-        Right => Some(b"\x1b[C".to_vec()),
-        Up => Some(b"\x1b[A".to_vec()),
-        Down => Some(b"\x1b[B".to_vec()),
-        Home => Some(b"\x1b[H".to_vec()),
-        End => Some(b"\x1b[F".to_vec()),
-        PageUp => Some(b"\x1b[5~".to_vec()),
-        PageDown => Some(b"\x1b[6~".to_vec()),
-        Delete => Some(b"\x1b[3~".to_vec()),
-        Insert => Some(b"\x1b[2~".to_vec()),
+        Enter => Some(meta(vec![b'\r'])),
+        Backspace => Some(meta(vec![if ctrl { 0x08 } else { 0x7f }])),
+        Tab => Some(meta(vec![b'\t'])),
+        BackTab => Some(meta(b"\x1b[Z".to_vec())),
+        Esc => Some(meta(vec![0x1b])),
+        Left => Some(csi('D')),
+        Right => Some(csi('C')),
+        Up => Some(csi('A')),
+        Down => Some(csi('B')),
+        Home => Some(csi('H')),
+        End => Some(csi('F')),
+        Insert => Some(tilde(2)),
+        Delete => Some(tilde(3)),
+        PageUp => Some(tilde(5)),
+        PageDown => Some(tilde(6)),
         _ => None,
     }
 }
@@ -973,6 +1006,43 @@ fn add_keys(app: &mut App, key: KeyEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encode_key_modifiers() {
+        let k = |code, mods| encode_key(KeyEvent::new(code, mods)).unwrap();
+        let (n, c, a, s) = (KeyModifiers::NONE, KeyModifiers::CONTROL, KeyModifiers::ALT, KeyModifiers::SHIFT);
+        // plain keys unchanged
+        assert_eq!(k(KeyCode::Char('x'), n), b"x");
+        assert_eq!(k(KeyCode::Left, n), b"\x1b[D");
+        assert_eq!(k(KeyCode::Home, n), b"\x1b[H");
+        assert_eq!(k(KeyCode::Delete, n), b"\x1b[3~");
+        // Ctrl / Alt on characters
+        assert_eq!(k(KeyCode::Char('c'), c), [0x03]);
+        assert_eq!(k(KeyCode::Char('b'), a), b"\x1bb");
+        assert_eq!(k(KeyCode::Char('.'), a), b"\x1b.");
+        assert_eq!(k(KeyCode::Char('x'), c | a), b"\x1b\x18");
+        assert_eq!(k(KeyCode::Char(' '), c), [0]);
+        // AltGr reported as Ctrl+Alt: the character itself
+        assert_eq!(k(KeyCode::Char('|'), c | a), b"|");
+        assert_eq!(k(KeyCode::Char('@'), c | a), b"@");
+        assert_eq!(k(KeyCode::Char('€'), c | a), "€".as_bytes());
+        // shift alone just changes the char (crossterm reports 'X' + SHIFT)
+        assert_eq!(k(KeyCode::Char('X'), s), b"X");
+        assert_eq!(k(KeyCode::Backspace, a), b"\x1b\x7f");
+        assert_eq!(k(KeyCode::Enter, a), b"\x1b\r");
+        // xterm modified cursor keys
+        assert_eq!(k(KeyCode::Left, c), b"\x1b[1;5D");
+        assert_eq!(k(KeyCode::Right, c), b"\x1b[1;5C");
+        assert_eq!(k(KeyCode::Up, a), b"\x1b[1;3A");
+        assert_eq!(k(KeyCode::Down, s), b"\x1b[1;2B");
+        assert_eq!(k(KeyCode::Left, c | s), b"\x1b[1;6D");
+        assert_eq!(k(KeyCode::Home, s), b"\x1b[1;2H");
+        assert_eq!(k(KeyCode::End, c), b"\x1b[1;5F");
+        assert_eq!(k(KeyCode::Delete, c), b"\x1b[3;5~");
+        assert_eq!(k(KeyCode::PageUp, s), b"\x1b[5;2~");
+        // non-ASCII with Ctrl doesn't get mangled into a control byte
+        assert_eq!(k(KeyCode::Char('é'), c), "é".as_bytes());
+    }
 
     #[test]
     fn single_line_flattens_paste() {
