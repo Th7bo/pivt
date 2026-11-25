@@ -149,6 +149,12 @@ pub fn load_commands() -> Vec<Command> {
     out
 }
 
+/// The bundled commands only (for tests that cross-check bundled data).
+#[cfg(test)]
+pub fn load_bundled_for_tests() -> Vec<Command> {
+    parse_commands(BUNDLED, false)
+}
+
 fn parse_commands(txt: &str, user: bool) -> Vec<Command> {
     match toml::from_str::<CommandFile>(txt) {
         Ok(f) => f

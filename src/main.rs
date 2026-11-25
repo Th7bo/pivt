@@ -3,10 +3,12 @@ mod app;
 mod clipboard;
 mod discord;
 mod gtfobins;
+mod hashid;
 mod loot;
 mod model;
 mod netif;
 mod ping;
+mod recipe;
 mod room;
 mod runner;
 mod theme;
@@ -160,6 +162,11 @@ fn snapshot(what: &str) {
             app.add.field = 3;
         }
         "help" => app.mode = Mode::Help,
+        "recipes" => {
+            app.vars.insert("PORTS".into(), "22,80,139,445".into());
+            app.scan_services = vec!["ssh".into(), "http".into(), "microsoft-ds".into()];
+            app.open_recipes();
+        }
         _ => app.mode = Mode::Normal,
     }
     let backend = TestBackend::new(110, 32);
@@ -315,6 +322,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::AddLoot => addloot_keys(app, key),
         Mode::Flag => flag_keys(app, key),
         Mode::Gtfo => gtfo_keys(app, key),
+        Mode::Recipes => recipe_keys(app, key),
     }
 }
 
@@ -343,6 +351,17 @@ fn flag_keys(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn recipe_keys(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.mode = Mode::Normal,
+        KeyCode::Down | KeyCode::Char('j') => app.recipe_next(),
+        KeyCode::Up | KeyCode::Char('k') => app.recipe_prev(),
+        KeyCode::Enter => app.run_selected_recipe(),
+        KeyCode::Char('A') => app.run_matched_recipes(),
+        _ => {}
+    }
+}
+
 fn loot_keys(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => app.mode = Mode::Normal,
@@ -354,6 +373,7 @@ fn loot_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Char('y') => app.loot_copy_pass(),
         KeyCode::Char('Y') => app.loot_copy_field(2), // hash
         KeyCode::Char('U') => app.loot_copy_field(0), // user
+        KeyCode::Char('c') => app.loot_crack(),
         _ => {}
     }
 }
@@ -502,6 +522,7 @@ fn normal_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Char('D') => app.toggle_discord(),
         KeyCode::Char('g') => app.open_gtfo(),
         KeyCode::Char('P') => app.parse_scan(),
+        KeyCode::Char('R') => app.open_recipes(),
         KeyCode::Char('F') => app.flag_open(),
         KeyCode::Char('E') => app.export_writeup(),
         _ => {}

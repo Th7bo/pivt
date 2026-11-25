@@ -38,6 +38,34 @@ Run `pivt`, press `?` for keybinds. Add your own commands in
 Screenshots are rendered headlessly:
 `PIVT_SNAP_ANSI=1 pivt snap normal > s.txt && python3 scripts/ansi2png.py s.txt s.png`.
 
+## Recipes (`R`)
+
+Bundles of commands that run together, one run tab each. After a scan, press
+`P` to parse it; recipes whose ports/services match the box float to the top
+(●). `⏎` runs the selected recipe, `A` runs every matched one at once. Steps
+with unset variables are skipped and listed in the status line.
+
+Bundled: first look, web recon, smb enum, ad recon, dns, snmp, ad with creds.
+Add or override your own in `~/.config/pivt/recipes.toml`:
+
+```toml
+[[recipe]]
+name = "ftp"
+description = "anon login check + banner"
+ports = [21]
+services = ["ftp"]
+steps = ["misc/my ftp check"]   # "category/command name"
+```
+
+## Cracking loot (`L` → `c`)
+
+Hashes in the loot view are identified offline (NTLM / secretsdump lines,
+NetNTLMv1/v2, kerberoast, AS-REP, DCC2, shadow `$6$`/`$5$`/`$1$`/`$y$`, bcrypt,
+phpass, Django, MySQL, zip/7z/rar/KeePass/Office/PDF/SSH keys, raw MD5/SHA*).
+`c` cracks the selected one in a run tab with **hashcat** (or **john jumbo**
+if hashcat isn't installed) against `WORDLIST` (default rockyou). When it
+finishes, the plaintext is saved to the entry and loaded into `PASS`.
+
 ## Discord Rich Presence
 
 pivt can advertise what you're working on to Discord via Rich Presence:

@@ -1,0 +1,56 @@
+# Recipes: run several commands at once, each in its own run tab.
+#
+#   name        shown in the picker (R)
+#   ports       recipe is "matched" when any of these is in PORTS (set by P)
+#   services    …or when the last parsed scan saw one of these nmap services
+#   steps       "category/command name" of bundled or user commands
+#
+# A recipe with no ports/services always matches. Override or add your own in
+# ~/.config/pivt/recipes.toml (same schema; same name replaces a bundled one).
+
+[[recipe]]
+name = "first look"
+description = "Fast top-ports scan plus the full TCP + top UDP sweeps in the background."
+steps = ["nmap/Quick top-ports", "nmap/Full TCP all-ports", "nmap/UDP top-100"]
+
+[[recipe]]
+name = "web recon"
+description = "Directory brute force, vuln templates and a nikto pass against URL."
+ports = [80, 443, 8000, 8080, 8443]
+services = ["http", "https", "http-proxy"]
+steps = ["web/ffuf dirs", "web/nuclei", "web/nikto"]
+
+[[recipe]]
+name = "smb enum"
+description = "Anonymous shares, share listing, and full enum4linux-ng + null RPC session."
+ports = [139, 445]
+services = ["microsoft-ds", "netbios-ssn"]
+steps = ["smb/smbmap anon", "smb/smbclient list", "smb/enum4linux-ng", "rpc/rpcclient null"]
+
+[[recipe]]
+name = "ad recon"
+description = "Anonymous LDAP dump plus Kerberos user enum and AS-REP roasting (needs DOMAIN)."
+ports = [88, 389, 636, 3268]
+services = ["kerberos-sec", "ldap"]
+steps = ["ad/ldapsearch anon", "ad/kerbrute users", "ad/GetNPUsers (ASREP)"]
+
+[[recipe]]
+name = "dns"
+description = "Zone transfer attempt and dnsrecon (needs DOMAIN)."
+ports = [53]
+services = ["domain"]
+steps = ["dns/zone transfer", "dns/dnsrecon"]
+
+[[recipe]]
+name = "snmp"
+description = "Community string brute force, full walk and snmp-check."
+ports = [161]
+services = ["snmp"]
+steps = ["snmp/onesixtyone", "snmp/snmpwalk v2c", "snmp/snmp-check"]
+
+[[recipe]]
+name = "ad with creds"
+description = "Once you have USER/PASS: kerberoast, BloodHound collection and a share check."
+ports = [88, 389]
+services = ["kerberos-sec", "ldap"]
+steps = ["ad/GetUserSPNs (kerberoast)", "ad/bloodhound-python", "smb/crackmapexec shares"]

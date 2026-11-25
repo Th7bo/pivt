@@ -49,6 +49,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::AddLoot => draw_addloot(f, app),
         Mode::Flag => draw_flag(f, app),
         Mode::Gtfo => draw_gtfo(f, app),
+        Mode::Recipes => draw_recipes(f, app),
         _ => {}
     }
 
@@ -745,10 +746,11 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Mode::Rooms => &[("↑↓", "move"), ("⏎", "activate"), ("n", "new"), ("o", "notes"), ("esc", "close")],
         Mode::Note => &[("type", "note"), ("⏎", "save"), ("esc", "cancel")],
         Mode::NewRoom => &[("⇥", "field"), ("^s", "create"), ("esc", "cancel")],
-        Mode::Loot => &[("↑↓", "move"), ("⏎", "use vars"), ("y", "copy pass"), ("Y/U", "hash/user"), ("a", "add"), ("d", "del"), ("esc", "close")],
+        Mode::Loot => &[("↑↓", "move"), ("⏎", "use vars"), ("y", "copy pass"), ("Y/U", "hash/user"), ("c", "crack"), ("a", "add"), ("d", "del"), ("esc", "close")],
         Mode::AddLoot => &[("⇥", "field"), ("^s", "save"), ("esc", "cancel")],
         Mode::Flag => &[("⇥", "user/root"), ("type", "value"), ("⏎", "save+copy"), ("esc", "cancel")],
         Mode::Gtfo => &[("type", "filter binary"), ("↑↓", "move"), ("⏎", "copy"), ("esc", "close")],
+        Mode::Recipes => &[("↑↓", "move"), ("⏎", "run recipe"), ("A", "run all matched"), ("esc", "close")],
         Mode::Normal => &[
             ("↹", "pane"), ("⏎", "copy"), ("x", "run"), ("e", "vars"),
             ("c", "room"), ("L", "loot"), ("w", "note"), ("/", "find"), ("?", "help"),
@@ -1060,6 +1062,14 @@ fn draw_loot(f: &mut Frame, app: &App) {
                         .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
                 ),
             ];
+            if !c.hash.is_empty() && c.pass.is_empty() {
+                if app.cracks.iter().any(|p| p.hash == c.hash) {
+                    spans.push(Span::styled("  ⬢ cracking…", Style::default().fg(SYN_NUM)));
+                } else if let Some(k) = crate::hashid::identify(&c.hash).first() {
+                    let mode = k.mode.map(|m| format!(" -m {m}")).unwrap_or_else(|| " john".into());
+                    spans.push(Span::styled(format!("  ⬢ {}{mode}", k.name), Style::default().fg(Color::Rgb(0xfb, 0x92, 0x3c))));
+                }
+            }
             if !c.note.is_empty() {
                 spans.push(Span::styled(format!("   {}", c.note), Style::default().fg(DIM)));
             }
@@ -1072,6 +1082,111 @@ fn draw_loot(f: &mut Frame, app: &App) {
         List::new(rows).highlight_style(Style::default().bg(SEL_BG)),
         inner,
         &mut state,
+    );
+}
+
+fn draw_recipes(f: &mut Frame, app: &App) {
+    let area = centered(f.area(), 96, 24);
+    f.render_widget(Clear, area);
+    let ports = app.vars.get("PORTS").cloned().unwrap_or_default();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(" recipes ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)))
+        .title(Line::from(Span::styled(
+            if ports.is_empty() { " no PORTS yet · scan + P ".to_string() } else { format!(" PORTS {ports} ") },
+            Style::default().fg(DIM),
+        )).right_aligned())
+        .style(Style::default().bg(PANEL));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let cols = Layout::horizontal([Constraint::Length(34), Constraint::Min(10)]).split(inner);
+
+    // left: list
+    let rows: Vec<ListItem> = app
+        .recipes
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let sel = i == app.recipe_idx;
+            let matched = app.recipe_matched(r);
+            let (dot, dc) = if matched {
+                ("●", OK)
+            } else if r.is_generic() {
+                ("◆", ACCENT)
+            } else {
+                ("○", DIM)
+            };
+            let mark = if sel {
+                Span::styled("▎", Style::default().fg(crate::anim::pulse(app.tick)))
+            } else {
+                Span::raw(" ")
+            };
+            ListItem::new(Line::from(vec![
+                mark,
+                Span::styled(format!(" {dot} "), Style::default().fg(dc)),
+                Span::styled(
+                    r.name.clone(),
+                    Style::default()
+                        .fg(if sel { FG } else if matched { Color::Rgb(0xb0, 0xbc, 0xc9) } else { DIM })
+                        .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
+                ),
+            ]))
+        })
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(app.recipe_idx));
+    f.render_stateful_widget(
+        List::new(rows).highlight_style(Style::default().bg(SEL_BG)),
+        cols[0],
+        &mut state,
+    );
+
+    // right: detail
+    let Some(r) = app.recipes.get(app.recipe_idx) else { return };
+    let mut lines = vec![
+        Line::from(Span::styled(r.name.clone(), Style::default().fg(FG).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(r.description.clone(), Style::default().fg(Color::Rgb(0x8b, 0x98, 0xa5)))),
+    ];
+    let mut when: Vec<String> = r.ports.iter().map(|p| p.to_string()).collect();
+    when.extend(r.services.iter().cloned());
+    lines.push(Line::from(vec![
+        Span::styled("when ", Style::default().fg(DIM)),
+        Span::styled(
+            if when.is_empty() { "always".to_string() } else { when.join(" · ") },
+            Style::default().fg(SYN_NUM),
+        ),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("steps", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD))));
+    for step in &r.steps {
+        match app.command_for_key(step) {
+            Some(c) => {
+                let (glyph, color) = crate::theme::category_style(&c.category);
+                let missing = app.missing_vars(c);
+                let mut spans = vec![
+                    Span::styled(format!(" {glyph} "), Style::default().fg(color)),
+                    Span::styled(c.name.clone(), Style::default().fg(FG)),
+                    Span::styled(format!("  {}", c.category), Style::default().fg(DIM)),
+                ];
+                if missing.is_empty() {
+                    spans.push(Span::styled("  ✓", Style::default().fg(OK)));
+                } else {
+                    spans.push(Span::styled(format!("  needs {}", missing.join(",")), Style::default().fg(WARN)));
+                }
+                lines.push(Line::from(spans));
+            }
+            None => lines.push(Line::from(vec![
+                Span::styled(" ✗ ", Style::default().fg(WARN)),
+                Span::styled(step.clone(), Style::default().fg(DIM)),
+                Span::styled("  unknown command", Style::default().fg(WARN)),
+            ])),
+        }
+    }
+    f.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        cols[1].inner(Margin { horizontal: 1, vertical: 0 }),
     );
 }
 
@@ -1430,6 +1545,7 @@ fn draw_help(f: &mut Frame) {
         row("enter", "fill from vars + copy (and log it)"),
         row("x", "run it live in the run pane (↓ tabs)"),
         row("P", "parse scan output → PORTS + ✸ suggested"),
+        row("R", "recipes: run command bundles · A = all matched"),
         row("e", "edit variables (split: this cmd / all)"),
         row("f", "pin ★ favorite (shows ★/⏱ categories)"),
         row("b", "toggle background: starfield ↔ flow field"),
@@ -1444,7 +1560,7 @@ fn draw_help(f: &mut Frame) {
         row("K / d", "kill job / close tab"),
         Line::from(Span::styled(" ctf rooms + writeup", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD))),
         row("c", "rooms: pick/activate, n=new, o=notes"),
-        row("L", "loot: creds · ⏎ load vars · y copy pass"),
+        row("L", "loot: creds · ⏎ load vars · c crack hash"),
         row("g", "GTFOBins privesc lookup (offline)"),
         row("w", "add a writeup note to the log"),
         row("F / E", "capture flag → notes · export writeup.md"),

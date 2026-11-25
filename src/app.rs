@@ -40,6 +40,7 @@ pub enum Mode {
     AddLoot,
     Flag,
     Gtfo,
+    Recipes,
 }
 
 #[derive(Default)]
@@ -127,6 +128,28 @@ pub const RECENT_CAT: &str = "recent";
 pub const SUGGEST_CAT: &str = "suggested";
 const RECENT_MAX: usize = 25;
 
+/// A hashcat run started from the loot view, waiting for its tab to exit.
+pub struct PendingCrack {
+    pub title: String,
+    pub hash: String,
+    pub out: std::path::PathBuf,
+    /// Output is `john --show` format rather than hashcat's plain list.
+    pub john: bool,
+}
+
+#[derive(Clone, Copy)]
+enum CrackTool {
+    Hashcat(u32),
+    John(&'static str),
+}
+
+/// Whether `bin` is an executable on $PATH.
+fn on_path(bin: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
+        .unwrap_or(false)
+}
+
 pub fn cmd_key(c: &Command) -> String {
     format!("{}/{}", c.category, c.name)
 }
@@ -178,6 +201,13 @@ pub struct App {
     // loot / creds
     pub loot: Vec<Cred>,
     pub loot_idx: usize,
+    /// hashcat runs started from the loot view, resolved when their tab exits.
+    pub cracks: Vec<PendingCrack>,
+    // recipes (R)
+    pub recipes: Vec<crate::recipe::Recipe>,
+    pub recipe_idx: usize,
+    /// nmap service names from the last parsed scan (P), for recipe matching.
+    pub scan_services: Vec<String>,
     pub loot_form: LootForm,
 
     // favorites + recent (command keys "category/name")
@@ -317,6 +347,10 @@ impl App {
             interacting: false,
             loot,
             loot_idx: 0,
+            cracks: Vec::new(),
+            recipes: crate::recipe::load_all(),
+            recipe_idx: 0,
+            scan_services: Vec::new(),
             loot_form: LootForm::default(),
             favorites,
             recent,
@@ -365,6 +399,7 @@ impl App {
             r.poll();
             r.resize(rows, cols);
         }
+        self.poll_cracks();
         // track RHOST changes: re-point the pinger and (re)start the box timer
         let rhost = self.vars.get("RHOST").cloned().unwrap_or_default();
         if rhost != self.last_rhost {
@@ -716,6 +751,19 @@ impl App {
         }
     }
 
+    /// Placeholders across all of a command's steps that have no value yet.
+    pub fn missing_vars(&self, c: &Command) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for step in c.run_steps() {
+            for p in extract_placeholders(&step) {
+                if self.vars.get(&p).map(|v| v.is_empty()).unwrap_or(true) && !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
     pub fn missing_vars_for_selected(&self) -> Vec<String> {
         match self.selected_cmd() {
             Some(c) => extract_placeholders(&c.template)
@@ -1015,14 +1063,29 @@ impl App {
     /// Execute the selected command's step(s), each in its own tab.
     pub fn run_selected(&mut self) {
         let Some(cmd) = self.selected_cmd().cloned() else { return };
-        let missing = self.missing_vars_for_selected();
+        let missing = self.missing_vars(&cmd);
         if !missing.is_empty() {
             self.set_status(format!("⚠ set {} before running (e)", missing.join(", ")));
             return;
         }
+        let first_new = self.runs.len();
+        let spawned = self.spawn_cmd(&cmd);
+        if spawned == 0 {
+            return;
+        }
+        self.show_runs_from(first_new);
+        self.set_status(format!(
+            "▶ running {} ({spawned} tab{}) · i to interact",
+            cmd.name,
+            if spawned == 1 { "" } else { "s" }
+        ));
+    }
+
+    /// Spawn every step of `cmd` in its own run tab (logging each), and push it
+    /// to recent. Returns how many tabs started. Callers check missing vars.
+    fn spawn_cmd(&mut self, cmd: &Command) -> usize {
         let steps = cmd.run_steps();
         let multi = steps.len() > 1;
-        let first_new = self.runs.len();
         let (rows, cols) = crate::runner::pane_size(self.run_fullscreen);
         let cwd = self.active_room.as_ref().map(|r| r.path.clone());
         let mut spawned = 0;
@@ -1045,20 +1108,119 @@ impl App {
                 Err(e) => self.set_status(format!("✗ spawn failed: {e}")),
             }
         }
-        if spawned == 0 {
-            return;
+        if spawned > 0 {
+            self.push_recent(cmd_key(cmd));
+            self.persist_config();
         }
-        self.push_recent(cmd_key(&cmd));
-        self.persist_config();
+        spawned
+    }
+
+    /// Show the run pane focused on the first tab spawned at `first_new`.
+    fn show_runs_from(&mut self, first_new: usize) {
         self.show_run = true;
         self.run_tab = first_new;
         self.focus = Focus::Run;
         self.interacting = false;
-        self.set_status(format!(
-            "▶ running {} ({spawned} tab{}) · i to interact",
-            cmd.name,
-            if spawned == 1 { "" } else { "s" }
-        ));
+    }
+
+    // ── recipes ──
+    /// Open the picker with recipes that match the box first, then generic
+    /// ones, then the rest.
+    pub fn open_recipes(&mut self) {
+        self.recipes = crate::recipe::load_all();
+        let ports = self.port_list();
+        let services = self.scan_services.clone();
+        self.recipes.sort_by_key(|r| {
+            if r.matches(&ports, &services) {
+                0
+            } else if r.is_generic() {
+                1
+            } else {
+                2
+            }
+        });
+        self.recipe_idx = 0;
+        self.mode = Mode::Recipes;
+    }
+    pub fn port_list(&self) -> Vec<u16> {
+        crate::recipe::parse_ports(self.vars.get("PORTS").map(String::as_str).unwrap_or(""))
+    }
+    pub fn recipe_matched(&self, r: &crate::recipe::Recipe) -> bool {
+        r.matches(&self.port_list(), &self.scan_services)
+    }
+    pub fn recipe_next(&mut self) {
+        if !self.recipes.is_empty() {
+            self.recipe_idx = (self.recipe_idx + 1) % self.recipes.len();
+        }
+    }
+    pub fn recipe_prev(&mut self) {
+        if !self.recipes.is_empty() {
+            self.recipe_idx = (self.recipe_idx + self.recipes.len() - 1) % self.recipes.len();
+        }
+    }
+    pub fn command_for_key(&self, key: &str) -> Option<&Command> {
+        self.commands.iter().find(|c| cmd_key(c) == key)
+    }
+
+    /// Run the selected recipe.
+    pub fn run_selected_recipe(&mut self) {
+        let Some(r) = self.recipes.get(self.recipe_idx).cloned() else { return };
+        self.run_recipes(&[r]);
+    }
+    /// Run every recipe that matches the box's ports/services (plus generic ones).
+    pub fn run_matched_recipes(&mut self) {
+        let picked: Vec<_> = self
+            .recipes
+            .iter()
+            .filter(|r| self.recipe_matched(r))
+            .cloned()
+            .collect();
+        if picked.is_empty() {
+            self.set_status("no recipe matches PORTS yet — run a scan and press P first");
+            return;
+        }
+        self.run_recipes(&picked);
+    }
+
+    fn run_recipes(&mut self, recipes: &[crate::recipe::Recipe]) {
+        let first_new = self.runs.len();
+        let mut started = 0;
+        let mut skipped: Vec<String> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+        for r in recipes {
+            for step in &r.steps {
+                if seen.contains(step) {
+                    continue; // same command in two recipes: run once
+                }
+                seen.push(step.clone());
+                let Some(cmd) = self.command_for_key(step).cloned() else {
+                    skipped.push(format!("{step} (unknown)"));
+                    continue;
+                };
+                let missing = self.missing_vars(&cmd);
+                if !missing.is_empty() {
+                    skipped.push(format!("{} (needs {})", cmd.name, missing.join(",")));
+                    continue;
+                }
+                started += self.spawn_cmd(&cmd);
+            }
+        }
+        let names = recipes.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", ");
+        if started == 0 {
+            self.set_status(format!("✗ nothing ran for {names}: {}", skipped.join("; ")));
+            return;
+        }
+        if self.logging {
+            let target = self.vars.get("RHOST").cloned().unwrap_or_default();
+            writeup::log_note(self.active_room.as_ref(), &target, &format!("▶ recipe: {names}"));
+        }
+        self.mode = Mode::Normal;
+        self.show_runs_from(first_new);
+        let mut msg = format!("▶ {names}: {started} tab{}", if started == 1 { "" } else { "s" });
+        if !skipped.is_empty() {
+            msg.push_str(&format!(" · skipped {}", skipped.join("; ")));
+        }
+        self.set_status(msg);
     }
 
     pub fn active_run(&self) -> Option<&RunJob> {
@@ -1157,6 +1319,7 @@ impl App {
             return;
         }
         self.vars.insert("PORTS".into(), ports.join(","));
+        self.scan_services = services.clone();
         // seed URL if a web port is open and URL unset
         let rhost = self.vars.get("RHOST").cloned().unwrap_or_default();
         if self.vars.get("URL").map(|u| u.is_empty()).unwrap_or(true) && !rhost.is_empty() {
@@ -1192,11 +1355,13 @@ impl App {
             self.cat_idx = pos;
             self.cmd_idx = 0;
         }
+        let recipes = self.recipes.iter().filter(|r| self.recipe_matched(r) && !r.is_generic()).count();
         self.set_status(format!(
-            "✓ {} ports ({}) → PORTS set, {} suggested",
+            "✓ {} ports ({}) → PORTS set, {} suggested, {recipes} recipe{} (R)",
             ports.len(),
             services.join(","),
-            self.suggested.len()
+            self.suggested.len(),
+            if recipes == 1 { "" } else { "s" }
         ));
     }
 
@@ -1305,6 +1470,154 @@ impl App {
             .map(|c| c.pass.is_empty() && !c.hash.is_empty())
             .unwrap_or(false);
         self.loot_copy_field(if use_hash { 2 } else { 1 });
+    }
+
+    /// Crack the selected entry's hash: identify it, write it to a file, and
+    /// run hashcat in a run tab. When the tab exits, `poll_cracks` reads the
+    /// cracked plaintext back into the entry (and PASS).
+    pub fn loot_crack(&mut self) {
+        let Some(c) = self.loot.get(self.loot_idx).cloned() else { return };
+        if c.hash.is_empty() {
+            self.set_status("no hash on this entry");
+            return;
+        }
+        if !c.pass.is_empty() {
+            self.set_status(format!("already cracked: {}", c.pass));
+            return;
+        }
+        if self.cracks.iter().any(|p| p.hash == c.hash) {
+            self.set_status("already cracking that one — see the run pane");
+            return;
+        }
+        let kinds = crate::hashid::identify(&c.hash);
+        let Some(kind) = kinds.first().copied() else {
+            self.set_status("✗ unknown hash format — try `hashid` / `john` manually");
+            return;
+        };
+        let wordlist = self
+            .vars
+            .get("WORDLIST")
+            .filter(|w| !w.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| "/usr/share/wordlists/rockyou.txt".into());
+
+        let dir = match &self.active_room {
+            Some(r) => r.path.join("loot").join("hashes"),
+            None => crate::model::config_dir().join("loot").join("hashes"),
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.set_status(format!("✗ can't create {}: {e}", dir.display()));
+            return;
+        }
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let hash_file = dir.join(format!("{n}.hash"));
+        let out_file = dir.join(format!("{n}.out"));
+        let hashcat = on_path("hashcat");
+        let tool = match (hashcat, kind.mode, kind.john()) {
+            (true, Some(m), _) => CrackTool::Hashcat(m),
+            (_, _, Some(f)) if on_path("john") => CrackTool::John(f),
+            _ => {
+                self.set_status(format!("✗ no cracker for {} — install hashcat or john", kind.name));
+                return;
+            }
+        };
+        // john wants login:hash; NetNTLM lines already carry their user.
+        let body = crate::hashid::crackable(&c.hash);
+        let body = match tool {
+            CrackTool::John(_) if !kind.name.starts_with("NetNTLM") => format!("pivt:{body}"),
+            _ => body,
+        };
+        if let Err(e) = std::fs::write(&hash_file, format!("{body}\n")) {
+            self.set_status(format!("✗ can't write hash file: {e}"));
+            return;
+        }
+        let q = |p: &std::path::Path| format!("'{}'", p.display().to_string().replace('\'', "'\\''"));
+        let (hf, of, wl) = (q(&hash_file), q(&out_file), q(std::path::Path::new(&wordlist)));
+        // --show after the attack also covers hashes already in the potfile.
+        let (cmd, how) = match tool {
+            CrackTool::Hashcat(m) => (
+                format!("hashcat -m {m} -a 0 {hf} {wl}; hashcat -m {m} {hf} --show --outfile-format 2 > {of}"),
+                format!("hashcat -m {m}"),
+            ),
+            CrackTool::John(f) => (
+                format!("john --format={f} --wordlist={wl} {hf}; john --show --format={f} {hf} > {of}"),
+                format!("john --format={f}"),
+            ),
+        };
+        let who = if c.user.is_empty() { "hash".to_string() } else { c.user.clone() };
+        let title = format!("crack {who} ({})", kind.name);
+        let (rows, cols) = crate::runner::pane_size(self.run_fullscreen);
+        let cwd = self.active_room.as_ref().map(|r| r.path.clone());
+        match RunJob::spawn(title.clone(), cmd.clone(), rows, cols, cwd.as_deref()) {
+            Ok(job) => {
+                if self.logging {
+                    let target = self.vars.get("RHOST").cloned().unwrap_or_default();
+                    writeup::log_command(self.active_room.as_ref(), &target, &title, "crack", &cmd);
+                }
+                self.runs.push(job);
+                self.cracks.push(PendingCrack { title, hash: c.hash.clone(), out: out_file, john: matches!(tool, CrackTool::John(_)) });
+                self.run_tab = self.runs.len() - 1;
+                self.show_run = true;
+                self.mode = Mode::Normal;
+                self.focus = Focus::Run;
+                self.set_status(format!("⬢ cracking {} with {how} · {wordlist}", kind.name));
+            }
+            Err(e) => self.set_status(format!("✗ spawn failed: {e}")),
+        }
+    }
+
+    /// Resolve finished crack tabs: read the plaintext hashcat wrote and store
+    /// it on the matching loot entry. Tabs the user closed are dropped.
+    fn poll_cracks(&mut self) {
+        if self.cracks.is_empty() {
+            return;
+        }
+        let mut still = Vec::new();
+        for p in std::mem::take(&mut self.cracks) {
+            match self.runs.iter().find(|j| j.title == p.title) {
+                Some(j) if j.is_running() => still.push(p),
+                Some(_) => self.finish_crack(&p),
+                None => {} // tab closed before it finished
+            }
+        }
+        self.cracks = still;
+    }
+
+    fn finish_crack(&mut self, p: &PendingCrack) {
+        let text = std::fs::read_to_string(&p.out).unwrap_or_default();
+        let plain = if p.john {
+            // `john --show`: "pivt:<plain>" or "user:<plain>:…" (NetNTLM), then a summary line.
+            text.lines()
+                .find(|l| l.contains(':') && !l.contains("password hash"))
+                .and_then(|l| match l.strip_prefix("pivt:") {
+                    Some(rest) => Some(rest.to_string()),
+                    None => l.split(':').nth(1).map(String::from),
+                })
+        } else {
+            text.lines().map(str::trim_end).find(|l| !l.is_empty()).map(String::from)
+        };
+        let Some(plain) = plain else {
+            self.set_status(format!("✗ {} — no hit (not in wordlist, or see the tab for errors)", p.title));
+            return;
+        };
+        let Some(idx) = self.loot.iter().position(|c| c.hash == p.hash) else { return };
+        self.loot[idx].pass = plain.clone();
+        let user = self.loot[idx].user.clone();
+        self.loot_persist();
+        self.vars.insert("PASS".into(), plain.clone());
+        if !user.is_empty() {
+            self.vars.insert("USER".into(), user.clone());
+        }
+        self.persist_config();
+        let who = if user.is_empty() { "hash".to_string() } else { user };
+        if self.logging {
+            let target = self.vars.get("RHOST").cloned().unwrap_or_default();
+            writeup::log_note(self.active_room.as_ref(), &target, &format!("🔓 cracked {who}: `{plain}`"));
+        }
+        self.set_status(format!("🔓 cracked {who}: {plain} → PASS set"));
     }
 
     pub fn loot_delete(&mut self) {
