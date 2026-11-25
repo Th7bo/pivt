@@ -99,6 +99,7 @@ Main view:
 | `favorite` | `f` | pin / unpin favorite |
 | `bg` | `b` | cycle background: stars / flow / off ([look](#look--motion)) |
 | `theme` / `theme_picker` | `t` / `T` | next theme / theme picker |
+| `settings` | `,` | [settings screen](#settings-) |
 | `discord` / `discord_privacy` | `D` / `M` | Discord presence on/off / privacy |
 | `gtfobins` | `g` | GTFOBins lookup |
 | `parse` | `P` | parse scan output |
@@ -308,6 +309,48 @@ the box timer. Handy on slow SSH links or if motion is distracting.
 
 `pivt snap <view> --size 80x24` (or `PIVT_SNAP_SIZE=80x24`) renders any of
 this headlessly at a given size.
+
+## Settings (`,`)
+
+`,` opens one screen with every setting, so you never have to hand-edit
+`config.toml`: sections down the left (General · Look & motion · Layout ·
+Theme · Discord & privacy · Scope & safety · Paths & integration ·
+Keybindings), the options of the selected one on the right with their
+current value, whether you set it (`● set`) or it's the default, and a short
+description; the detail line below shows the range or choices and the
+default. `/` filters every option by name or description.
+
+| on a… | keys |
+|---|---|
+| on/off option | `⏎` / `space` toggle · `←` off · `→` on |
+| number | `←` / `→` step · `⏎` type an exact value |
+| choice | `←` / `→` / `⏎` cycle |
+| glyph set | `←` / `→` cycle the presets · `⏎` type your own |
+| path / text | `⏎` edit inline (`^u` clears) |
+| theme | `↑` / `↓` preview live · `⏎` keep (leaving reverts the preview) |
+| any row | `r` back to the default |
+
+Everything applies live (layout, theme, background, borders redraw at once)
+and is saved straight away. Only what you change is written: `r` removes
+the key from `config.toml` rather than writing the default. Typed values are
+validated like the config file; an invalid one turns red and isn't saved
+(numbers out of range are refused, not clamped). The splash options take
+effect at the next start, and `rooms_dir` says so when `$CTF_ROOT` overrides
+it. `Esc` goes back to the sections, then closes; `,` closes too.
+
+**Keybindings.** Every action is listed with its keys. `⏎` waits for a key
+and *adds* it to the action, `c` waits for one and *replaces* all its keys,
+`⌫` removes the last key, `r` restores the defaults (removing the `[keys]`
+entry). While waiting, `Esc` cancels and `⌫` removes. The [usual
+rules](#keybindings) apply: a key you bind beats a default (the action that
+had it is shown with `⚠ x is taken by …`), between two of your bindings the
+action listed first keeps it (you're told), `ctrl-c` is refused, and `help`,
+`detach` and `settings` always keep at least one key. A list that ends up
+equal to the defaults is dropped from `[keys]`.
+
+`pivt snap settings` (or `settings:keys`, `settings:look`, `settings:theme`,
+…, `settings:/<filter>`, `settings:capture`, `settings:edit`) renders it
+headlessly.
 
 ## Rooms and shell integration
 
