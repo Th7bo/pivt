@@ -13,6 +13,7 @@ mod ping;
 mod recipe;
 mod room;
 mod runner;
+mod scope;
 mod session;
 mod theme;
 mod tools;
@@ -204,6 +205,20 @@ fn snapshot(what: &str, theme: Option<&str>) {
             app.add.field = 3;
         }
         "help" => app.mode = Mode::Help,
+        // run inside a room dir (cwd) to see its scope
+        "scope" => {
+            app.mode = Mode::Normal;
+            app.open_scope(None);
+        }
+        "scope-prompt" => {
+            app.mode = Mode::Normal;
+            app.vars.insert("RHOST".into(), "10.10.11.42".into());
+            app.scope_prompt = Some(app::ScopePrompt {
+                hosts: vec!["10.10.11.42".into()],
+                scope: "192.168.56.102, dc-2".into(),
+                action: app::PendingRun::Rerun(0),
+            });
+        }
         "themes" => app.open_theme_picker(),
         "history" => {
             use history::{Action, Entry};
@@ -488,6 +503,15 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         app.answer_quit(matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')));
         return;
     }
+    // "outside this room's scope — run anyway?": y run · a add + run · else cancel
+    if app.scope_prompt.is_some() {
+        let c = match key.code {
+            KeyCode::Char(c) => c,
+            _ => 'n',
+        };
+        app.scope_answer(c);
+        return;
+    }
     // interacting with a job's PTY: keystrokes go to the program.
     // Detach with F12 (layout-independent; Ctrl-] also works on QWERTY).
     if app.mode == Mode::Normal && app.focus == Focus::Run && app.interacting {
@@ -536,6 +560,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             _ => {}
         },
         Mode::History => history_keys(app, key),
+        Mode::Scope => scope_keys(app, key),
         Mode::Export => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => app.export_writeup(true),
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Enter => app.export_writeup(false),
@@ -548,7 +573,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 /// Route a bracketed paste to whatever is taking text input right now. Never
 /// replays it as keystrokes: with no text field active the paste is dropped.
 fn handle_paste(app: &mut App, text: &str) {
-    if text.is_empty() || app.confirm_quit {
+    if text.is_empty() || app.confirm_quit || app.scope_prompt.is_some() {
         return;
     }
     // interacting with a job: hand the paste to the program in the PTY
@@ -588,6 +613,11 @@ fn handle_paste(app: &mut App, text: &str) {
         Mode::Flag => app.flag_buf.push_str(&line),
         Mode::Gtfo => line.chars().for_each(|c| app.gtfo_push(c)),
         Mode::History => line.chars().for_each(|c| app.history_push(c)),
+        Mode::Scope => {
+            if let Some(b) = app.scope_edit.input.as_mut() {
+                b.push_str(&line);
+            }
+        }
         Mode::Htb => {
             if let Some(b) = app.htb_input_buf() {
                 b.push_str(&line);
@@ -666,6 +696,31 @@ fn history_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => app.history_copy(),
         KeyCode::Char('x') => app.history_rerun(),
         KeyCode::Char('l') => app.history_open_log(),
+        _ => {}
+    }
+}
+
+fn scope_keys(app: &mut App, key: KeyEvent) {
+    if let Some(buf) = app.scope_edit.input.as_mut() {
+        match key.code {
+            KeyCode::Esc => app.scope_edit.input = None,
+            KeyCode::Enter => app.scope_edit_commit(),
+            KeyCode::Backspace => {
+                buf.pop();
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => buf.push(c),
+            _ => {}
+        }
+        return;
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('S') => app.close_scope(),
+        KeyCode::Down | KeyCode::Char('j') => app.scope_edit_move(true),
+        KeyCode::Up | KeyCode::Char('k') => app.scope_edit_move(false),
+        KeyCode::Char('a') | KeyCode::Char('n') => app.scope_edit.input = Some(String::new()),
+        KeyCode::Char('d') | KeyCode::Delete => app.scope_edit_delete(),
+        KeyCode::Char('r') => app.scope_edit_reset(),
+        KeyCode::Char('m') => app.scope_cycle_mode(),
         _ => {}
     }
 }
@@ -798,6 +853,11 @@ fn rooms_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => app.activate_selected_room(),
         KeyCode::Char('n') => app.new_room_open(),
         KeyCode::Char('p') => app.rooms_cycle_platform(),
+        KeyCode::Char('s') => {
+            if let Some(r) = app.rooms.get(app.room_idx).cloned() {
+                app.open_scope(Some(r));
+            }
+        }
         KeyCode::Char('o') => {
             // open the highlighted room's notes
             if let Some(r) = app.rooms.get(app.room_idx) {
@@ -921,6 +981,7 @@ fn normal_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Char('E') => app.export_open(),
         KeyCode::Char('m') => app.toggle_hide_missing(),
         KeyCode::Char('y') => app.open_history(),
+        KeyCode::Char('S') => app.open_scope(None),
         _ => {}
     }
 }

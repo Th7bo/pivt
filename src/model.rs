@@ -149,6 +149,11 @@ pub struct Config {
     /// ~/.cache/ctf-target, but only if that file already exists; "" = off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_target_file: Option<String>,
+    /// What running against a host outside the room's scope does: "warn",
+    /// "confirm" (default) or "strict". A string so an unknown value falls
+    /// back to confirm instead of failing the parse.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scope_mode: String,
     #[serde(default)]
     pub vars: BTreeMap<String, String>,
 }

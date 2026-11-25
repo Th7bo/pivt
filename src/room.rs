@@ -61,6 +61,28 @@ pub fn parse_platform(marker: &str) -> Option<Platform> {
     })
 }
 
+fn marker_key(line: &str) -> Option<&str> {
+    line.split_once('=').map(|(k, _)| k.trim())
+}
+
+/// `scope = ["10.10.10.0/24", "dc-2"]` from a `.ctfroom` marker's contents.
+pub fn parse_scope(marker: &str) -> Option<Vec<String>> {
+    #[derive(serde::Deserialize)]
+    struct M {
+        scope: Option<Vec<String>>,
+    }
+    let list = match toml::from_str::<M>(marker) {
+        Ok(m) => m.scope,
+        // not valid TOML as a whole: read just the scope line
+        Err(_) => marker.lines().find(|l| marker_key(l) == Some("scope")).and_then(|l| {
+            let rhs = l.split_once('=')?.1;
+            toml::from_str::<M>(&format!("scope = {rhs}")).ok()?.scope
+        }),
+    }?;
+    let list: Vec<String> = list.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    (!list.is_empty()).then_some(list)
+}
+
 #[derive(Debug, Clone)]
 pub struct Room {
     pub name: String,
@@ -99,8 +121,49 @@ impl Room {
     }
     /// Record (or clear) the room's platform in its `.ctfroom` marker.
     pub fn set_platform(&self, p: Option<Platform>) -> std::io::Result<()> {
-        let body = p.map(|p| format!("platform = \"{}\"\n", p.key())).unwrap_or_default();
-        std::fs::write(self.path.join(".ctfroom"), body)
+        self.marker_set("platform", p.map(|p| format!("\"{}\"", p.key())))
+    }
+    /// The room's explicit scope from its `.ctfroom` (`scope = [...]`), if
+    /// any. None (or an empty list) = use the defaults.
+    pub fn scope(&self) -> Option<Vec<String>> {
+        std::fs::read_to_string(self.marker()).ok().as_deref().and_then(parse_scope)
+    }
+    /// Store the room's explicit scope (None / empty = back to defaults).
+    pub fn set_scope(&self, entries: Option<&[String]>) -> std::io::Result<()> {
+        let value = entries.filter(|e| !e.is_empty()).map(|e| {
+            let quoted: Vec<String> = e.iter().map(|s| toml::Value::String(s.clone()).to_string()).collect();
+            format!("[{}]", quoted.join(", "))
+        });
+        self.marker_set("scope", value)
+    }
+    fn marker(&self) -> PathBuf {
+        self.path.join(".ctfroom")
+    }
+    /// Set (or remove) one `key = value` line of the `.ctfroom` marker,
+    /// keeping every other line. Written 0600 like the other room files.
+    fn marker_set(&self, key: &str, value: Option<String>) -> std::io::Result<()> {
+        let old = std::fs::read_to_string(self.marker()).unwrap_or_default();
+        let mut out = String::new();
+        let mut lines = old.lines();
+        while let Some(l) = lines.next() {
+            if marker_key(l) == Some(key) {
+                // a hand-written multi-line array: drop its continuation lines
+                if l.contains('[') && !l.contains(']') {
+                    for c in lines.by_ref() {
+                        if c.contains(']') {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            out.push_str(l);
+            out.push('\n');
+        }
+        if let Some(v) = value {
+            out.push_str(&format!("{key} = {v}\n"));
+        }
+        crate::model::write_private(&self.marker(), out)
     }
     /// First few non-empty note lines, for a preview.
     pub fn notes_preview(&self, max: usize) -> Vec<String> {
@@ -238,6 +301,33 @@ mod tests {
         assert_eq!(Platform::Thm.url("Blue"), "https://tryhackme.com/room/blue");
         assert_eq!(Platform::Htb.url("Lame"), "https://app.hackthebox.com/machines/Lame");
         assert_eq!(Platform::Htb.url("a b/../c"), "https://app.hackthebox.com/machines/ab..c");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn scope_marker_roundtrip_keeps_platform() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pivt-scope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".ctfroom"), "# made by ctf new\nplatform = \"htb\"\nscope = [\n  \"old\",\n]\n").unwrap();
+        let r = Room { name: "Lame".into(), path: dir.clone() };
+        assert_eq!(r.scope(), Some(vec!["old".to_string()]), "multi-line array");
+        let list = vec!["10.10.10.0/24".to_string(), "dc-2".to_string(), "*.htb".to_string()];
+        r.set_scope(Some(&list)).unwrap();
+        assert_eq!(r.scope(), Some(list));
+        assert_eq!(r.platform(), Some(Platform::Htb), "platform kept");
+        let body = std::fs::read_to_string(dir.join(".ctfroom")).unwrap();
+        assert!(body.starts_with("# made by ctf new\n") && !body.contains("old"), "{body}");
+        assert_eq!(std::fs::metadata(dir.join(".ctfroom")).unwrap().permissions().mode() & 0o777, 0o600);
+        // the platform toggle doesn't drop the scope either
+        r.set_platform(Some(Platform::Thm)).unwrap();
+        assert_eq!(r.scope().map(|s| s.len()), Some(3));
+        r.set_scope(None).unwrap();
+        assert_eq!(r.scope(), None);
+        assert_eq!(r.platform(), Some(Platform::Thm));
+        assert_eq!(parse_scope("scope = []"), None);
+        assert_eq!(parse_scope("junk ][\nscope = [\"a\"]"), Some(vec!["a".to_string()]));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

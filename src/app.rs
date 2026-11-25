@@ -49,6 +49,36 @@ pub enum Mode {
     Export,
     /// Per-room copy/run history (`^r` / `y`).
     History,
+    /// Scope editor for a room (`S`, or `s` in the rooms view).
+    Scope,
+}
+
+/// A run held back because it targets something outside the room's scope,
+/// waiting for the y / a / N answer.
+#[derive(Clone)]
+pub enum PendingRun {
+    Command(Command),
+    Recipes(Vec<crate::recipe::Recipe>),
+    /// Re-run of the run tab holding this job id.
+    Rerun(u64),
+    History(Entry),
+}
+
+/// "10.10.11.42 is outside this room's scope — run anyway?"
+pub struct ScopePrompt {
+    pub hosts: Vec<String>,
+    pub scope: String,
+    pub action: PendingRun,
+}
+
+/// The scope editor: which room, the highlighted entry, the entry being typed.
+#[derive(Default)]
+pub struct ScopeEditor {
+    pub room: Option<Room>,
+    pub idx: usize,
+    pub input: Option<String>,
+    /// Opened from the rooms view (esc goes back there).
+    pub from_rooms: bool,
 }
 
 /// Text being typed inside the HTB panel.
@@ -174,6 +204,8 @@ pub struct Sequence {
     /// Key of the command those jobs belong to.
     pub current: Option<String>,
     pub queue: std::collections::VecDeque<Command>,
+    /// Out-of-scope hosts the user said yes to for this sequence's steps.
+    pub approved: Vec<String>,
 }
 
 impl Sequence {
@@ -351,6 +383,29 @@ pub struct App {
     /// A job log to show in $PAGER (the event loop suspends the TUI).
     pub pending_pager: Option<PathBuf>,
 
+    // scope enforcement (src/scope.rs)
+    /// Active room's effective scope, refreshed about every second.
+    pub scope: crate::scope::Scope,
+    pub scope_mode: crate::scope::Mode,
+    /// `scope_mode` as written in config.toml (kept even if unknown).
+    scope_mode_cfg: String,
+    /// A run waiting for "outside scope — run anyway?".
+    pub scope_prompt: Option<ScopePrompt>,
+    /// Hosts approved for the action being replayed after a "y".
+    scope_allow: Vec<String>,
+    /// warn mode: out-of-scope hosts of the last spawn, for the status line.
+    scope_note: Vec<String>,
+    pub scope_edit: ScopeEditor,
+    /// This machine's interface addresses (never out of scope).
+    local_ips: Vec<String>,
+    /// Hosts file used to map vhosts onto in-scope addresses.
+    etc_hosts_path: PathBuf,
+    etc_hosts: crate::scope::EtcHosts,
+    /// RHOST carried over from the previous room into one without a
+    /// `.target`: not written into the new room (so it can't become its
+    /// default scope) until it's changed.
+    rhost_carried: Option<String>,
+
     matcher: SkimMatcherV2,
 }
 
@@ -376,6 +431,12 @@ impl App {
         // deterministic: every tool "installed" unless a test says otherwise
         a.tools = crate::tools::ToolIndex::everything();
         a.refresh_missing();
+        a.local_ips.clear();
+        a.active_room = None; // never a real room picked up from the cwd
+        a.rhost_carried = None;
+        a.scope = Default::default();
+        a.etc_hosts_path = PathBuf::from("/nonexistent/pivt-test-hosts");
+        a.etc_hosts = Default::default();
         a
     }
 
@@ -429,6 +490,7 @@ impl App {
             }
             netif::LhostCheck::Keep => {}
         }
+        let local_ips: Vec<String> = ifaces.iter().map(|(_, ip)| ip.clone()).collect();
         let lhost_stale = netif::is_local(vars.get("LHOST").map(String::as_str).unwrap_or(""), &ifaces) == Some(false);
         // IFACE (masscan -e): the interface carrying LHOST
         if vars.get("IFACE").map(|s| s.is_empty()).unwrap_or(true) {
@@ -456,6 +518,10 @@ impl App {
                 vars.insert("RHOST".into(), ip);
             }
         }
+        let rhost_carried = active_room
+            .as_ref()
+            .filter(|r| r.read_target().is_none())
+            .and_then(|_| vars.get("RHOST").filter(|v| !v.is_empty()).cloned());
 
         let loot = {
             let target = vars.get("RHOST").cloned().unwrap_or_default();
@@ -557,8 +623,20 @@ impl App {
             history_pending: Vec::new(),
             history_dir: None,
             pending_pager: None,
+            scope: Default::default(),
+            scope_mode: crate::scope::Mode::parse(&cfg.scope_mode),
+            scope_mode_cfg: cfg.scope_mode.clone(),
+            scope_prompt: None,
+            scope_allow: Vec::new(),
+            scope_note: Vec::new(),
+            scope_edit: ScopeEditor::default(),
+            local_ips,
+            etc_hosts_path: PathBuf::from("/etc/hosts"),
+            etc_hosts: Default::default(),
+            rhost_carried,
             matcher: SkimMatcherV2::default(),
         };
+        app.refresh_scope();
         app.refresh_missing();
         app.refresh_categories();
         app.clamp();
@@ -595,7 +673,11 @@ impl App {
         // track RHOST changes: re-point the pinger and (re)start the box timer
         let rhost = self.vars.get("RHOST").cloned().unwrap_or_default();
         if rhost != self.last_rhost {
+            if self.rhost_carried.as_ref().is_some_and(|c| *c != rhost) {
+                self.rhost_carried = None;
+            }
             self.last_rhost = rhost.clone();
+            self.refresh_scope();
             self.pinger.set_target(&rhost);
             if rhost.is_empty() {
                 self.box_started = None;
@@ -608,6 +690,9 @@ impl App {
         }
         if self.lhost_watch && self.tick.is_multiple_of(LHOST_CHECK_TICKS) {
             self.refresh_lhost_stale();
+        }
+        if self.tick.is_multiple_of(20) {
+            self.refresh_scope();
         }
         if self.session_on && self.tick.is_multiple_of(SESSION_CHECK_TICKS) {
             let full = self.tick.saturating_sub(self.session_full_tick) >= SESSION_FULL_TICKS;
@@ -1036,6 +1121,7 @@ impl App {
                 if !missing.is_empty() {
                     msg.push_str(&format!(" (⚠ unset: {})", missing.join(", ")));
                 }
+                msg.push_str(&self.scope_copy_warning(&filled));
                 if self.logging {
                     let target = self.vars.get("RHOST").cloned().unwrap_or_default();
                     let path = writeup::log_command(
@@ -1098,6 +1184,7 @@ impl App {
             rooms_dir: self.path_cfg.0.clone(),
             room_template: self.path_cfg.1.clone(),
             sync_target_file: self.path_cfg.2.clone(),
+            scope_mode: self.scope_mode_cfg.clone(),
         };
         let _ = save_config(&cfg);
         // keep the shell target file (if enabled) + room .target in sync with RHOST
@@ -1106,7 +1193,8 @@ impl App {
                 if let Some(t) = &self.paths.target_file {
                     write_ctf_target(t, rhost);
                 }
-                if let Some(r) = &self.active_room {
+                // a RHOST carried over from the last room isn't this room's target
+                if let Some(r) = self.active_room.as_ref().filter(|_| self.rhost_carried.as_ref() != Some(rhost)) {
                     let host = self.vars.get("DOMAIN").cloned().unwrap_or_default();
                     r.write_target(rhost, &host);
                 }
@@ -1159,7 +1247,9 @@ impl App {
     /// Recompute the header's "LHOST is not a local address" warning.
     pub fn refresh_lhost_stale(&mut self) {
         let lhost = self.vars.get("LHOST").cloned().unwrap_or_default();
-        self.lhost_stale = !lhost.is_empty() && netif::is_local(&lhost, &netif::list_ifaces()) == Some(false);
+        let ifaces = netif::list_ifaces();
+        self.lhost_stale = !lhost.is_empty() && netif::is_local(&lhost, &ifaces) == Some(false);
+        self.local_ips = ifaces.into_iter().map(|(_, ip)| ip).collect();
     }
     pub fn vars_detect_lhost(&mut self) {
         if let Some(ip) = netif::detect_lhost() {
@@ -1318,6 +1408,8 @@ impl App {
             self.leave_room_session();
             let tgt = r.read_target();
             self.active_room = Some(r.clone());
+            let carried = tgt.is_none().then(|| self.vars.get("RHOST").cloned()).flatten().filter(|v| !v.is_empty());
+            self.rhost_carried = carried.clone();
             if let Some((ip, host)) = tgt {
                 self.vars.insert("RHOST".into(), ip);
                 if let Some(h) = host {
@@ -1325,7 +1417,14 @@ impl App {
                 }
             }
             self.persist_config();
-            self.set_status(format!("◆ room '{}' active", r.name));
+            self.refresh_scope();
+            match carried {
+                Some(ip) => self.set_status(format!(
+                    "◆ room '{}' active · ⚠ RHOST {ip} is from the last room — not in this room's scope until you set it",
+                    r.name
+                )),
+                None => self.set_status(format!("◆ room '{}' active", r.name)),
+            }
         }
         self.mode = Mode::Normal;
     }
@@ -1391,6 +1490,11 @@ impl App {
                 }
                 self.leave_room_session();
                 self.active_room = Some(r.clone());
+                self.rhost_carried = if ip.is_empty() {
+                    self.vars.get("RHOST").cloned().filter(|v| !v.is_empty())
+                } else {
+                    None
+                };
                 if !ip.is_empty() {
                     self.vars.insert("RHOST".into(), ip);
                 }
@@ -1398,6 +1502,7 @@ impl App {
                     self.vars.insert("DOMAIN".into(), host);
                 }
                 self.persist_config();
+                self.refresh_scope();
                 self.set_status(format!("✓ room '{}' created → {}", r.name, short_path(&r.path)));
                 true
             }
@@ -1450,6 +1555,12 @@ impl App {
     /// Execute the selected command's step(s), each in its own tab.
     pub fn run_selected(&mut self) {
         let Some(cmd) = self.selected_cmd().cloned() else { return };
+        self.run_command(cmd);
+    }
+
+    /// `x` on `cmd`: refuse target-side, unset vars, missing tools and (per
+    /// `scope_mode`) hosts outside the room's scope; then spawn its steps.
+    pub fn run_command(&mut self, cmd: Command) {
         if cmd.is_target() {
             self.set_status(format!("⛔ {TARGET_SIDE_MSG}"));
             return;
@@ -1464,6 +1575,10 @@ impl App {
             self.set_status(Self::missing_tool_msg(&tools));
             return;
         }
+        let lines = self.filled_steps(&cmd);
+        if !self.scope_gate(&lines, PendingRun::Command(cmd.clone())) {
+            return;
+        }
         let first_new = self.runs.len();
         let spawned = self.spawn_cmd(&cmd);
         if spawned == 0 {
@@ -1475,8 +1590,9 @@ impl App {
         } else {
             format!(" · created {}", self.made_dirs.join(" "))
         };
+        let note = self.take_scope_note();
         self.set_status(format!(
-            "▶ running {} ({spawned} tab{}){made} · i to interact",
+            "▶ running {} ({spawned} tab{}){made} · i to interact{note}",
             cmd.name,
             if spawned == 1 { "" } else { "s" }
         ));
@@ -1489,6 +1605,20 @@ impl App {
         if cmd.is_target() {
             self.set_status(format!("⛔ {TARGET_SIDE_MSG}"));
             return 0;
+        }
+        // the last line of defence for every spawn path (x, recipes,
+        // sequences): callers ask first, so anything left here wasn't approved
+        let oos = self.scope_violations(&self.filled_steps(cmd));
+        if !oos.is_empty() {
+            if self.scope_mode != crate::scope::Mode::Warn {
+                self.set_status(format!(
+                    "⛔ {}: {} is outside this room's scope — not run (S edits the scope)",
+                    cmd.name,
+                    oos.join(", ")
+                ));
+                return 0;
+            }
+            self.scope_note = oos;
         }
         let steps = cmd.run_steps();
         let multi = steps.len() > 1;
@@ -1535,6 +1665,263 @@ impl App {
         self.run_tab = first_new;
         self.focus = Focus::Run;
         self.interacting = false;
+    }
+
+    // ── scope ──
+    /// Each step of `cmd`, filled from the vars (what would actually run).
+    fn filled_steps(&self, cmd: &Command) -> Vec<String> {
+        cmd.run_steps().iter().map(|s| fill_template(s, &self.vars)).collect()
+    }
+
+    /// Effective scope of `r`: its explicit list, else the defaults from its
+    /// `.target` plus the HTB machine IP when the room is that machine.
+    pub fn scope_for_room(&self, r: &Room) -> crate::scope::Scope {
+        use crate::scope::Scope;
+        if let Some(list) = r.scope() {
+            return Scope::from_strings(&list, true);
+        }
+        let htb_ip = self
+            .htb
+            .snapshot()
+            .machine
+            .filter(|m| m.name.eq_ignore_ascii_case(&r.name))
+            .and_then(|m| m.ip);
+        Scope::from_strings(&crate::scope::defaults(r.read_target(), htb_ip.as_deref()), false)
+    }
+
+    /// Re-read the active room's scope and the hosts file (for the header).
+    pub fn refresh_scope(&mut self) {
+        self.scope = match &self.active_room {
+            Some(r) => self.scope_for_room(r),
+            None => Default::default(),
+        };
+        self.etc_hosts = crate::scope::EtcHosts::load(&self.etc_hosts_path);
+    }
+
+    fn scope_local(&self) -> crate::scope::Local {
+        crate::scope::Local {
+            lhost: self.vars.get("LHOST").cloned().unwrap_or_default(),
+            ips: self.local_ips.clone(),
+        }
+    }
+
+    /// Hosts in `lines` outside the active room's scope (read fresh from
+    /// disk), minus any the user already approved for this action. No room
+    /// = no scope = nothing flagged.
+    pub fn scope_violations(&self, lines: &[String]) -> Vec<String> {
+        let Some(r) = &self.active_room else { return Vec::new() };
+        let scope = self.scope_for_room(r);
+        let hosts = crate::scope::EtcHosts::load(&self.etc_hosts_path);
+        crate::scope::out_of_scope(lines, &self.vars, &scope, &self.scope_local(), &hosts)
+            .iter()
+            .map(|a| a.to_string())
+            .filter(|h| !self.scope_allow.contains(h) && !self.sequence.approved.contains(h))
+            .collect()
+    }
+
+    /// RHOST against the cached scope: None without a room or RHOST.
+    pub fn rhost_in_scope(&self) -> Option<bool> {
+        self.active_room.as_ref()?;
+        let rhost = self.vars.get("RHOST").filter(|v| !v.is_empty())?;
+        let a = crate::scope::Addr::parse(rhost)?;
+        Some(self.scope_local().covers(&a) || self.scope.allows(&a, &self.etc_hosts))
+    }
+
+    /// Decide whether a run touching `lines` may go ahead now. warn: yes
+    /// (noted in the status line); confirm: no, ask (the action replays on
+    /// y / a); strict: no, refused.
+    fn scope_gate(&mut self, lines: &[String], action: PendingRun) -> bool {
+        use crate::scope::Mode as M;
+        let hosts = self.scope_violations(lines);
+        if hosts.is_empty() {
+            return true;
+        }
+        let summary = self.active_room.as_ref().map(|r| self.scope_for_room(r).summary(4)).unwrap_or_default();
+        match self.scope_mode {
+            M::Warn => {
+                self.scope_note = hosts;
+                true
+            }
+            M::Confirm => {
+                self.scope_prompt = Some(ScopePrompt { hosts, scope: summary, action });
+                false
+            }
+            M::Strict => {
+                self.set_status(format!(
+                    "⛔ {} outside this room's scope ({summary}) — strict mode, not run · S edits the scope",
+                    hosts.join(", ")
+                ));
+                false
+            }
+        }
+    }
+
+    /// " · ⚠ x outside scope" after a warn-mode spawn (and clear it).
+    fn take_scope_note(&mut self) -> String {
+        let hosts = std::mem::take(&mut self.scope_note);
+        if hosts.is_empty() {
+            String::new()
+        } else {
+            format!(" · ⚠ {} outside scope", hosts.join(", "))
+        }
+    }
+
+    /// Copies are never blocked, only flagged.
+    fn scope_copy_warning(&self, line: &str) -> String {
+        let hosts = self.scope_violations(&[line.to_string()]);
+        if hosts.is_empty() {
+            String::new()
+        } else {
+            format!(" · ⚠ {} outside scope", hosts.join(", "))
+        }
+    }
+
+    /// Answer the scope prompt: `y` run once, `a` add the hosts to the
+    /// room's scope and run, anything else cancels.
+    pub fn scope_answer(&mut self, key: char) {
+        let Some(p) = self.scope_prompt.take() else { return };
+        let list = p.hosts.join(", ");
+        match key {
+            'y' | 'Y' => {
+                if self.logging {
+                    let target = self.vars.get("RHOST").cloned().unwrap_or_default();
+                    writeup::log_note(self.active_room.as_ref(), &target, &format!("⚠ ran against {list} — outside the room's scope (confirmed)"));
+                }
+            }
+            'a' | 'A' => {
+                if let Err(e) = self.scope_add(&p.hosts) {
+                    self.set_status(format!("✗ couldn't save the scope: {e}"));
+                    return;
+                }
+            }
+            _ => {
+                self.set_status(format!("✗ not run — {list} is outside this room's scope"));
+                return;
+            }
+        }
+        self.scope_allow = p.hosts.clone();
+        match p.action {
+            PendingRun::Command(c) => self.run_command(c),
+            PendingRun::Recipes(r) => self.run_recipes(&r),
+            PendingRun::Rerun(id) => {
+                if let Some(i) = self.runs.iter().position(|j| j.id == id) {
+                    self.run_tab = i;
+                    self.run_rerun_active();
+                }
+            }
+            PendingRun::History(e) => self.history_rerun_entry(e),
+        }
+        self.scope_allow.clear();
+        if matches!(key, 'a' | 'A') {
+            self.status.push_str(&format!(" · ⊙ added {list} to scope"));
+        }
+    }
+
+    /// Add entries to the active room's scope (seeded with its defaults the
+    /// first time, so pinning a scope never drops the room's own target).
+    fn scope_add(&mut self, hosts: &[String]) -> std::io::Result<()> {
+        let Some(r) = self.active_room.clone() else { return Ok(()) };
+        self.scope_add_to(&r, hosts)
+    }
+
+    fn scope_add_to(&mut self, r: &Room, hosts: &[String]) -> std::io::Result<()> {
+        let mut list = self.scope_for_room(r).strings();
+        for h in hosts {
+            if let Some(a) = crate::scope::Addr::parse(h) {
+                let s = a.to_string();
+                if !list.contains(&s) {
+                    list.push(s);
+                }
+            }
+        }
+        r.set_scope(Some(&list))?;
+        self.refresh_scope();
+        Ok(())
+    }
+
+    // ── scope editor (S / rooms view s) ──
+    /// Open the editor for `room` (None = the active room).
+    pub fn open_scope(&mut self, room: Option<Room>) {
+        let from_rooms = room.is_some();
+        let Some(r) = room.or_else(|| self.active_room.clone()) else {
+            self.set_status("no active room — scope is per room (c picks or creates one)");
+            return;
+        };
+        self.scope_edit = ScopeEditor { room: Some(r), idx: 0, input: None, from_rooms };
+        self.mode = Mode::Scope;
+    }
+    pub fn close_scope(&mut self) {
+        self.mode = if self.scope_edit.from_rooms { Mode::Rooms } else { Mode::Normal };
+        self.scope_edit.input = None;
+    }
+    /// The edited room's effective scope.
+    pub fn scope_edit_scope(&self) -> crate::scope::Scope {
+        self.scope_edit.room.as_ref().map(|r| self.scope_for_room(r)).unwrap_or_default()
+    }
+    pub fn scope_edit_move(&mut self, down: bool) {
+        let n = self.scope_edit_scope().entries.len();
+        if n > 0 {
+            self.scope_edit.idx = if down { (self.scope_edit.idx + 1) % n } else { (self.scope_edit.idx + n - 1) % n };
+        }
+    }
+    /// ⏎ on the add line: one or more entries (space / comma separated).
+    pub fn scope_edit_commit(&mut self) {
+        let Some(buf) = self.scope_edit.input.take() else { return };
+        let Some(r) = self.scope_edit.room.clone() else { return };
+        let words: Vec<&str> = buf.split([' ', ',']).filter(|w| !w.is_empty()).collect();
+        let bad: Vec<&str> = words.iter().copied().filter(|w| crate::scope::Addr::parse(w).is_none()).collect();
+        if !bad.is_empty() {
+            self.set_status(format!("✗ not an IP, CIDR or hostname: {}", bad.join(" ")));
+            self.scope_edit.input = Some(buf);
+            return;
+        }
+        if words.is_empty() {
+            return;
+        }
+        let add: Vec<String> = words.iter().map(|w| w.to_string()).collect();
+        match self.scope_add_to(&r, &add) {
+            Ok(()) => {
+                self.scope_edit.idx = self.scope_edit_scope().entries.len().saturating_sub(1);
+                self.set_status(format!("⊙ scope of '{}': added {}", r.name, add.join(", ")));
+            }
+            Err(e) => self.set_status(format!("✗ couldn't save the scope: {e}")),
+        }
+    }
+    /// `d`: drop the highlighted entry (pins the defaults first).
+    pub fn scope_edit_delete(&mut self) {
+        let Some(r) = self.scope_edit.room.clone() else { return };
+        let mut list = self.scope_for_room(&r).strings();
+        if self.scope_edit.idx >= list.len() {
+            return;
+        }
+        let gone = list.remove(self.scope_edit.idx);
+        let res = r.set_scope(Some(&list));
+        self.refresh_scope();
+        match res {
+            Ok(()) if list.is_empty() => self.set_status(format!("⊙ removed {gone} · scope empty → back to the defaults")),
+            Ok(()) => self.set_status(format!("⊙ removed {gone}")),
+            Err(e) => self.set_status(format!("✗ couldn't save the scope: {e}")),
+        }
+        let n = self.scope_edit_scope().entries.len();
+        self.scope_edit.idx = self.scope_edit.idx.min(n.saturating_sub(1));
+    }
+    /// `r`: forget the explicit list, back to `.target` / HTB defaults.
+    pub fn scope_edit_reset(&mut self) {
+        let Some(r) = self.scope_edit.room.clone() else { return };
+        let res = r.set_scope(None);
+        self.refresh_scope();
+        self.scope_edit.idx = 0;
+        match res {
+            Ok(()) => self.set_status("⊙ scope back to the defaults (.target ip + host, HTB machine)"),
+            Err(e) => self.set_status(format!("✗ couldn't save the scope: {e}")),
+        }
+    }
+    /// `m`: cycle warn → confirm → strict (saved in config.toml).
+    pub fn scope_cycle_mode(&mut self) {
+        self.scope_mode = self.scope_mode.next();
+        self.scope_mode_cfg = self.scope_mode.as_str().to_string();
+        self.persist_config();
+        self.set_status(format!("⊙ scope_mode = {}", self.scope_mode.as_str()));
     }
 
     // ── hack the box ──
@@ -1620,6 +2007,7 @@ impl App {
         let ip = self.htb.snapshot().machine.and_then(|m| m.ip);
         if ip.is_some() && ip != self.htb_last_ip {
             self.htb_last_ip = ip.clone();
+            self.refresh_scope();
             let ip = ip.unwrap_or_default();
             if self.vars.get("RHOST") != Some(&ip) {
                 self.vars.insert("RHOST".into(), ip.clone());
@@ -1689,6 +2077,17 @@ impl App {
     }
 
     fn run_recipes(&mut self, recipes: &[crate::recipe::Recipe]) {
+        // one scope question for the whole batch
+        let lines: Vec<String> = recipes
+            .iter()
+            .flat_map(|r| r.steps.iter())
+            .filter_map(|k| self.command_for_key(k))
+            .filter(|c| !c.is_target() && self.missing_vars(c).is_empty() && self.missing_tools(c).is_empty())
+            .flat_map(|c| self.filled_steps(c))
+            .collect();
+        if !self.scope_gate(&lines, PendingRun::Recipes(recipes.to_vec())) {
+            return;
+        }
         let first_new = self.runs.len();
         let mut started = 0;
         let mut queued = 0;
@@ -1733,6 +2132,11 @@ impl App {
                 }
             }
         }
+        // queued sequential steps run later: carry the approval with them
+        if self.sequence.current.is_some() {
+            let allow = self.scope_allow.clone();
+            self.sequence.approved.extend(allow);
+        }
         let names = recipes.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", ");
         if started == 0 && queued > 0 {
             self.mode = Mode::Normal;
@@ -1757,6 +2161,7 @@ impl App {
         if !skipped.is_empty() {
             msg.push_str(&format!(" · skipped {}", skipped.join("; ")));
         }
+        msg.push_str(&self.take_scope_note());
         self.set_status(msg);
     }
 
@@ -1792,6 +2197,7 @@ impl App {
         if stopped {
             let n = self.sequence.queue.len();
             self.sequence.queue.clear();
+            self.sequence.approved.clear();
             if n > 0 {
                 self.set_status(format!("⏹ sequence stopped — {n} queued step{} dropped", if n == 1 { "" } else { "s" }));
             }
@@ -1811,10 +2217,12 @@ impl App {
             }
             if self.spawn_sequence_step(&cmd) > 0 {
                 let left = self.sequence.queue.len();
-                self.set_status(format!("▶ next in sequence: {} · {left} left", cmd.name));
+                let note = self.take_scope_note();
+                self.set_status(format!("▶ next in sequence: {} · {left} left{note}", cmd.name));
                 return;
             }
         }
+        self.sequence.approved.clear();
     }
 
     pub fn active_run(&self) -> Option<&RunJob> {
@@ -1896,6 +2304,11 @@ impl App {
             self.set_status(Self::missing_tool_msg(&tools));
             return;
         }
+        let id = job.id;
+        let bare = cmd.strip_prefix(RAW_PTY_PREFIX).unwrap_or(&cmd).to_string();
+        if !self.scope_gate(&[bare], PendingRun::Rerun(id)) {
+            return;
+        }
         let Some(job) = self.runs.get(self.run_tab) else { return };
         // the room dir may be gone since the session was saved
         let cwd = job.cwd.clone().filter(|d| d.is_dir());
@@ -1914,7 +2327,8 @@ impl App {
                 self.record_run(&self.key_for_title(&title), &title, &bare, &new);
                 self.runs[self.run_tab] = new;
                 self.interacting = false;
-                self.set_status(format!("↻ re-running {title} · i to interact"));
+                let note = self.take_scope_note();
+                self.set_status(format!("↻ re-running {title} · i to interact{note}"));
             }
             Err(e) => self.set_status(format!("✗ spawn failed: {e}")),
         }
@@ -2061,7 +2475,10 @@ impl App {
     pub fn history_copy(&mut self) {
         let Some(e) = self.history_selected().cloned() else { return };
         match clipboard::copy(&e.cmd) {
-            Ok(how) => self.set_status(format!("✓ copied ({}) · {}", how.label(), e.name)),
+            Ok(how) => {
+                let warn = self.scope_copy_warning(&e.cmd);
+                self.set_status(format!("✓ copied ({}) · {}{warn}", how.label(), e.name))
+            }
             Err(err) => self.set_status(format!("✗ copy failed: {err}")),
         }
     }
@@ -2070,6 +2487,10 @@ impl App {
     /// as `x` on a command: target-side refused, tools must be installed.
     pub fn history_rerun(&mut self) {
         let Some(e) = self.history_selected().cloned() else { return };
+        self.history_rerun_entry(e);
+    }
+
+    fn history_rerun_entry(&mut self, e: Entry) {
         let cmd = self.command_for_key(&e.key).cloned();
         let target_side = match &cmd {
             Some(c) => c.is_target(),
@@ -2087,6 +2508,9 @@ impl App {
         let tools = self.missing_tools_line(&e.cmd);
         if !tools.is_empty() {
             self.set_status(Self::missing_tool_msg(&tools));
+            return;
+        }
+        if !self.scope_gate(std::slice::from_ref(&e.cmd), PendingRun::History(e.clone())) {
             return;
         }
         let cwd = self.active_room.as_ref().map(|r| r.path.clone());
@@ -2110,7 +2534,8 @@ impl App {
                 self.runs.push(job);
                 self.mode = Mode::Normal;
                 self.show_runs_from(first_new);
-                self.set_status(format!("↻ re-running {} from history · i to interact", e.name));
+                let note = self.take_scope_note();
+                self.set_status(format!("↻ re-running {} from history · i to interact{note}", e.name));
             }
             Err(err) => self.set_status(format!("✗ spawn failed: {err}")),
         }
@@ -3310,5 +3735,247 @@ mod tests {
         app.runs.pop();
         app.poll_cracks();
         assert!(app.cracks.is_empty());
+    }
+
+    // ── scope ──
+
+    fn local_cmd(category: &str, name: &str, template: &str) -> Command {
+        Command {
+            category: category.into(),
+            name: name.into(),
+            description: String::new(),
+            template: template.into(),
+            tags: vec![],
+            steps: vec![],
+            side: Side::Local,
+            raw_pty: false,
+            requires: vec![],
+            user: false,
+        }
+    }
+
+    /// `seq_app` + scan-like test commands (`true <RHOST>`, nothing is
+    /// contacted), with a temp room `lame` (`.target` = `target`) active.
+    fn scoped_app(tag: &str, target: Option<&str>) -> (App, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("pivt-app-scope-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".ctfroom"), "").unwrap();
+        if let Some(t) = target {
+            std::fs::write(dir.join(".target"), format!("{t}\n")).unwrap();
+        }
+        let mut app = seq_app();
+        app.commands.push(local_cmd("t", "scan", "true <RHOST>"));
+        app.commands.push(local_cmd("t", "scan2", "true -p 7744 <RHOST>"));
+        app.vars.insert("LHOST".into(), "10.10.14.7".into());
+        app.vars.insert("LPORT".into(), "4444".into());
+        app.active_room = Some(Room { name: "lame".into(), path: dir.clone() });
+        app.refresh_scope();
+        (app, dir)
+    }
+
+    fn scan(app: &App, name: &str) -> Command {
+        app.commands[app.command_by_key(&format!("t/{name}")).unwrap()].clone()
+    }
+
+    #[test]
+    fn scope_confirm_asks_then_runs_once_or_adds() {
+        let (mut app, dir) = scoped_app("confirm", Some("10.10.10.3 lame.htb"));
+        assert_eq!(app.scope_mode, crate::scope::Mode::Confirm, "default mode");
+        let c = scan(&app, "scan");
+        // in scope: runs straight away
+        app.vars.insert("RHOST".into(), "10.10.10.3".into());
+        assert_eq!(app.rhost_in_scope(), Some(true));
+        app.run_command(c.clone());
+        assert!(app.scope_prompt.is_none());
+        assert_eq!(app.runs.len(), 1);
+        // a stale RHOST: held back with a question
+        app.vars.insert("RHOST".into(), "10.10.11.42".into());
+        assert_eq!(app.rhost_in_scope(), Some(false));
+        app.run_command(c.clone());
+        let p = app.scope_prompt.as_ref().expect("asks");
+        assert_eq!(p.hosts, ["10.10.11.42"]);
+        assert_eq!(p.scope, "10.10.10.3, lame.htb, *.lame.htb");
+        assert_eq!(app.runs.len(), 1);
+        app.scope_answer('n');
+        assert!(app.scope_prompt.is_none() && app.runs.len() == 1);
+        assert!(app.status.contains("not run"), "{}", app.status);
+        // y = this once
+        app.run_command(c.clone());
+        app.scope_answer('y');
+        assert_eq!(app.runs.len(), 2);
+        assert!(app.scope_allow.is_empty());
+        let room = app.active_room.clone().unwrap();
+        assert_eq!(room.scope(), None, "y doesn't change the scope");
+        app.run_command(c.clone());
+        assert!(app.scope_prompt.is_some(), "asks again next time");
+        // a = add to scope (defaults pinned first) and run
+        app.scope_answer('a');
+        assert_eq!(app.runs.len(), 3);
+        assert_eq!(room.scope().unwrap(), ["10.10.10.3", "lame.htb", "*.lame.htb", "10.10.11.42"]);
+        assert!(app.status.contains("added 10.10.11.42 to scope"), "{}", app.status);
+        assert_eq!(app.rhost_in_scope(), Some(true));
+        app.run_command(c);
+        assert!(app.scope_prompt.is_none());
+        assert_eq!(app.runs.len(), 4);
+        settle(&mut app, 4);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn scope_modes_and_every_spawn_path() {
+        use crate::scope::Mode as M;
+        let (mut app, dir) = scoped_app("modes", Some("10.10.10.3"));
+        app.vars.insert("RHOST".into(), "10.10.11.42".into());
+        let c = scan(&app, "scan");
+        // warn: runs, flagged in the status line
+        app.scope_mode = M::Warn;
+        app.run_command(c.clone());
+        assert_eq!(app.runs.len(), 1);
+        assert!(app.status.contains("⚠ 10.10.11.42 outside scope"), "{}", app.status);
+        // strict: refused, no question
+        app.scope_mode = M::Strict;
+        app.run_command(c.clone());
+        assert!(app.scope_prompt.is_none() && app.runs.len() == 1);
+        assert!(app.status.contains("strict"), "{}", app.status);
+        // spawn_cmd itself refuses anything not approved (confirm + strict)
+        app.scope_mode = M::Confirm;
+        assert_eq!(app.spawn_cmd(&c), 0);
+        assert!(app.status.contains("outside this room's scope — not run"), "{}", app.status);
+        // recipes: one question for the batch
+        app.run_recipes(&[recipe("r", &["t/scan"], false)]);
+        assert!(matches!(app.scope_prompt.as_ref().map(|p| &p.action), Some(PendingRun::Recipes(_))));
+        app.scope_answer('y');
+        assert_eq!(app.runs.len(), 2);
+        // sequential: the approval covers the queued steps too, then expires
+        app.run_recipes(&[recipe("seq", &["t/a", "t/scan2"], true)]);
+        app.scope_answer('y');
+        assert_eq!(app.sequence.approved, ["10.10.11.42"]);
+        settle(&mut app, 4);
+        assert!(app.sequence.approved.is_empty());
+        // run-pane r and history x go through the same question
+        app.run_tab = 0;
+        app.run_rerun_active();
+        assert!(matches!(app.scope_prompt.as_ref().map(|p| &p.action), Some(PendingRun::Rerun(_))));
+        app.scope_answer('y');
+        settle(&mut app, 4);
+        let e = Entry::new(Action::Run, "t/scan", "scan", "true 10.10.11.42");
+        app.history_rerun_entry(e);
+        assert!(matches!(app.scope_prompt.as_ref().map(|p| &p.action), Some(PendingRun::History(_))));
+        app.scope_answer('n');
+        assert_eq!(app.runs.len(), 4);
+        // copies: only a warning
+        assert_eq!(app.scope_copy_warning("ssh x@10.10.11.42"), " · ⚠ 10.10.11.42 outside scope");
+        assert_eq!(app.scope_copy_warning("ssh x@10.10.10.3"), "");
+        // no room: no scope, nothing flagged
+        app.active_room = None;
+        app.refresh_scope();
+        assert_eq!(app.rhost_in_scope(), None);
+        app.run_command(c);
+        assert!(app.scope_prompt.is_none());
+        assert_eq!(app.runs.len(), 5);
+        settle(&mut app, 5);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn listeners_lhost_and_bundled_commands_not_flagged() {
+        let (mut app, dir) = scoped_app("lhost", Some("10.10.10.3 lame.htb"));
+        for (k, v) in [("RHOST", "10.10.10.3"), ("DOMAIN", "lame.htb"), ("URL", "http://lame.htb"), ("USER", "svc"), ("PASS", "p@ss")] {
+            app.vars.insert(k.into(), v.into());
+        }
+        for line in [
+            "nc -lvnp 4444",
+            "python3 -m http.server 4444 --bind 10.10.14.7",
+            "curl http://10.10.14.7:4444/linpeas.sh",
+            "rlwrap nc -lvnp 4444 -s 0.0.0.0",
+        ] {
+            assert!(app.scope_violations(&[line.to_string()]).is_empty(), "{line}");
+        }
+        // every bundled local command, filled for an in-scope box, passes
+        let ph: Vec<String> = app.commands.iter().flat_map(|c| c.run_steps()).flat_map(|s| extract_placeholders(&s)).collect();
+        for p in ph {
+            app.vars.entry(p).or_insert_with(|| "x".into());
+        }
+        let mut flagged = Vec::new();
+        for c in app.commands.iter().filter(|c| !c.is_target()) {
+            let v = app.scope_violations(&app.filled_steps(c));
+            if !v.is_empty() {
+                flagged.push(format!("{}: {v:?}", cmd_key(c)));
+            }
+        }
+        // only the two that really reach past the box: a /24 sweep, a /16 route
+        assert_eq!(
+            flagged,
+            ["nmap/Ping sweep subnet: [\"10.10.10.0/24\"]", "tunnel/sshuttle: [\"10.10.0.0/16\"]"],
+            "false positives: {flagged:#?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn default_scope_htb_and_carried_rhost() {
+        let (mut app, dir) = scoped_app("defaults", Some("10.10.10.3 lame.htb"));
+        app.htb = crate::htb::Htb::with_state(crate::htb::HtbState {
+            machine: Some(crate::htb::Machine { name: "Lame".into(), ip: Some("10.129.7.7".into()), ..Default::default() }),
+            ..Default::default()
+        });
+        app.refresh_scope();
+        assert!(!app.scope.explicit);
+        assert_eq!(app.scope.strings(), ["10.10.10.3", "lame.htb", "10.129.7.7", "*.lame.htb"]);
+        // a room without .target: the old RHOST is carried, and out of scope
+        let other = std::env::temp_dir().join(format!("pivt-app-scope-other-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&other);
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join(".ctfroom"), "").unwrap();
+        app.vars.insert("RHOST".into(), "10.10.10.3".into());
+        app.rooms = vec![Room { name: "next".into(), path: other.clone() }];
+        app.room_idx = 0;
+        app.activate_selected_room();
+        assert_eq!(app.rhost_carried.as_deref(), Some("10.10.10.3"));
+        assert!(app.status.contains("from the last room"), "{}", app.status);
+        assert!(app.scope.entries.is_empty());
+        assert_eq!(app.rhost_in_scope(), Some(false));
+        app.run_command(scan(&app, "scan"));
+        assert_eq!(app.scope_prompt.as_ref().map(|p| p.scope.as_str()), Some("none set"));
+        app.scope_answer('n');
+        // setting RHOST clears the carry-over
+        app.vars.insert("RHOST".into(), "10.10.10.9".into());
+        app.on_tick();
+        assert_eq!(app.rhost_carried, None);
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&other).ok();
+    }
+
+    #[test]
+    fn scope_editor_add_remove_reset() {
+        let (mut app, dir) = scoped_app("editor", Some("10.10.10.3 lame.htb"));
+        app.open_scope(None);
+        assert!(app.mode == Mode::Scope);
+        app.scope_edit.input = Some("10.10.12.0/24 bad..x".into());
+        app.scope_edit_commit();
+        assert!(app.status.contains("bad..x"), "{}", app.status);
+        assert_eq!(app.scope_edit.input.as_deref(), Some("10.10.12.0/24 bad..x"), "kept for fixing");
+        app.scope_edit.input = Some("10.10.12.0/24, dc-2".into());
+        app.scope_edit_commit();
+        let sc = app.scope_edit_scope();
+        assert!(sc.explicit);
+        assert_eq!(sc.strings(), ["10.10.10.3", "lame.htb", "*.lame.htb", "10.10.12.0/24", "dc-2"]);
+        assert_eq!(app.scope.strings(), sc.strings(), "header cache follows");
+        app.scope_edit.idx = 1;
+        app.scope_edit_delete();
+        assert_eq!(app.scope_edit_scope().strings(), ["10.10.10.3", "*.lame.htb", "10.10.12.0/24", "dc-2"]);
+        app.scope_edit_reset();
+        assert!(!app.scope_edit_scope().explicit);
+        app.scope_cycle_mode();
+        assert_eq!(app.scope_mode, crate::scope::Mode::Strict);
+        assert_eq!(app.scope_mode_cfg, "strict");
+        app.close_scope();
+        assert!(app.mode == Mode::Normal);
+        // no room: nothing to edit
+        app.active_room = None;
+        app.open_scope(None);
+        assert!(app.mode == Mode::Normal && app.status.contains("no active room"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

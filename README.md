@@ -133,8 +133,8 @@ dns snmp rpc db tunnel forensics pwn win msf favorites recent suggested`.
 A room is a directory with a `.ctfroom` marker, holding `nmap/ loot/
 exploits/`, `notes.md`, the command log and job logs. `c` lists and activates
 rooms, `n` scaffolds one, `p` marks the highlighted room as a THM room or HTB
-machine (see [Discord](#discord-rich-presence)). Starting pivt inside a room
-activates it.
+machine (see [Discord](#discord-rich-presence)), `s` edits its
+[scope](#scope-s). Starting pivt inside a room activates it.
 
 Where rooms live, first match wins:
 
@@ -165,6 +165,64 @@ export TARGET=$(cat ~/.cache/ctf-target 2>/dev/null)
 ```
 
 Each room also gets a `.target` file (`<ip> [host]`) with the same contents.
+
+## Scope (`S`)
+
+Each room has a scope: the hosts its commands are allowed to touch. Before
+anything runs (`x`, recipe and sequence steps, `r` in the run pane, `x` in
+the history), pivt reads the hosts out of the **filled** command line and
+checks them against the active room's scope, so a stale `RHOST` from the
+last box, a typo, or a real host on your own network doesn't get scanned by
+accident.
+
+What counts as a host: IPv4 addresses and CIDRs (`10.10.10.0/24`, an nmap
+range like `10.10.10.1-254` by its base), IPv6, URL hosts
+(`http://dev.box.htb:8080/…`; only the authority, not a path or an SSRF
+payload in it), `user@host`, `domain/user:pass@host`, `@dns-server`,
+`//host/share`, `host.tld:port`, bare dotted names with a known TLD
+(`box.htb`, `dc01.corp.local`), and the values of `RHOST`, `DOMAIN`, `URL`,
+`HOST`, `VHOST`, `DC`… whenever they appear in the line. Versions like
+`7.0.0` or `2.4.10`, file names (`rockyou.txt`, `http.server`), `-p 7744`
+and passwords containing `@` are not hosts.
+
+Always allowed: `LHOST`, this machine's interface addresses, loopback,
+`localhost`, `0.0.0.0`, and a few public reference sites (GitHub, PyPI,
+HTB/THM). A command with no target at all (listeners, `http.server`) always
+passes. Without an active room nothing is checked.
+
+**Defaults** (zero config): a room with no explicit scope is scoped to its
+`.target` IP and hostname (plus `*.hostname` for vhosts), and to the HTB
+machine's IP when the room is that machine. A hostname also counts when
+`/etc/hosts` maps it onto an in-scope address. Activating a room that has no
+`.target` doesn't adopt the previous room's `RHOST`: it is flagged until you
+set a target for the new room.
+
+**When a host is outside the scope**, `scope_mode` in `config.toml` decides:
+
+```toml
+scope_mode = "confirm"   # default: ask · "warn": run, say so · "strict": refuse
+```
+
+`confirm` asks *"10.10.11.42 is outside this room's scope (192.168.56.102,
+dc-2) — run anyway?"*: `y` runs it once (logged to the writeup), `a` adds the
+host to the scope and runs, anything else cancels. One question covers a
+whole recipe, and a yes carries over to its queued sequential steps. Copies
+(`⏎`) are never blocked; the status line just warns. An unknown
+`scope_mode` falls back to `confirm`.
+
+The header shows `⊙ scope: N` on the target box and `✓` / `⚠` next to
+`RHOST`. `S` (or `s` on a room in `c`) opens the scope editor: `a` adds
+entries (several at once, space or comma separated), `d` removes one, `r`
+goes back to the defaults, `m` cycles `scope_mode`. Entries are IPv4 / IPv6
+addresses, CIDRs, hostnames and `*.domain` wildcards. Pinning a scope (the
+first add or remove) starts from the current defaults, so the room's own
+target stays in. The scope lives in the room's `.ctfroom` next to its
+platform (the file is `0600`):
+
+```toml
+platform = "htb"
+scope = ["192.168.56.102", "dc-2", "10.10.110.0/24", "*.corp.local"]
+```
 
 ## Sessions
 

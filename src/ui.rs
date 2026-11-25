@@ -54,9 +54,13 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::Export => draw_export(f, app),
         Mode::Theme => draw_theme_picker(f, app),
         Mode::History => draw_history(f, app),
+        Mode::Scope => draw_scope(f, app),
         _ => {}
     }
 
+    if app.scope_prompt.is_some() {
+        draw_scope_prompt(f, app);
+    }
     if app.confirm_quit {
         draw_confirm_quit(f, app);
     }
@@ -110,7 +114,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         .constraints([
             Constraint::Length(22), // logo
             Constraint::Min(16),    // search
-            Constraint::Length(38), // target strip
+            Constraint::Length(40), // target strip
         ])
         .split(area);
 
@@ -173,10 +177,17 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         Some(false) => Span::styled("● ", Style::default().fg(theme().warn)),
         None => Span::styled("○ ", Style::default().fg(theme().dim)),
     };
+    // ✓ / ⚠: RHOST inside / outside the active room's scope
+    let mark = match app.rhost_in_scope() {
+        Some(true) => Span::styled(" ✓", Style::default().fg(theme().ok)),
+        Some(false) => Span::styled(" ⚠", Style::default().fg(theme().warn).add_modifier(Modifier::BOLD)),
+        None => Span::raw(""),
+    };
     let targets = Line::from(vec![
         Span::raw(" "),
         dot,
         v(&rhost, "no target"),
+        mark,
         Span::styled("  ⇡ ", Style::default().fg(theme().accent2)),
         if lhost.is_empty() && lport.is_empty() {
             Span::styled("no listener", Style::default().fg(theme().warn))
@@ -193,7 +204,13 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         (Some(t), None) => format!(" ⏱ {t} "),
         _ => String::new(),
     };
-    let mut block = bare_block(theme().border).title(Span::styled(" target ", Style::default().fg(theme().dim)));
+    let mut title = vec![Span::styled(" target ", Style::default().fg(theme().dim))];
+    if app.active_room.is_some() {
+        let n = app.scope.entries.len();
+        let color = if n == 0 || app.rhost_in_scope() == Some(false) { theme().warn } else { theme().accent2 };
+        title.push(Span::styled(format!("⊙ scope: {n} "), Style::default().fg(color)));
+    }
+    let mut block = bare_block(theme().border).title(Line::from(title));
     if !timer.is_empty() {
         block = block.title(Line::from(Span::styled(timer, Style::default().fg(theme().dim))).right_aligned());
     }
@@ -808,7 +825,9 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Mode::Add => &[("⇥", "field"), ("^s", "save"), ("esc", "cancel")],
         Mode::Help => &[("esc", "close")],
         Mode::Splash => &[],
-        Mode::Rooms => &[("↑↓", "move"), ("⏎", "activate"), ("n", "new"), ("o", "notes"), ("p", "thm/htb"), ("esc", "close")],
+        Mode::Rooms => &[("↑↓", "move"), ("⏎", "activate"), ("n", "new"), ("o", "notes"), ("p", "thm/htb"), ("s", "scope"), ("esc", "close")],
+        Mode::Scope if app.scope_edit.input.is_some() => &[("type", "ip / cidr / host"), ("⏎", "add"), ("esc", "cancel")],
+        Mode::Scope => &[("↑↓", "move"), ("a", "add"), ("d", "remove"), ("r", "defaults"), ("m", "mode"), ("esc", "close")],
         Mode::Note => &[("type", "note"), ("⏎", "save"), ("esc", "cancel")],
         Mode::NewRoom => &[("⇥", "field"), ("^s", "create"), ("esc", "cancel")],
         Mode::Loot => &[("↑↓", "move"), ("⏎", "use vars"), ("y", "copy pass"), ("Y/U", "hash/user"), ("c", "crack"), ("a", "add"), ("d", "del"), ("esc", "close")],
@@ -1732,6 +1751,12 @@ fn draw_rooms(f: &mut Frame, app: &App) {
                 ),
             ]));
         }
+        let sc = app.scope_for_room(r);
+        lines.push(Line::from(vec![
+            Span::styled("scope   ", Style::default().fg(theme().dim)),
+            Span::styled(sc.summary(4), Style::default().fg(if sc.entries.is_empty() { theme().warn } else { theme().fg })),
+            Span::styled(if sc.explicit { "" } else { "  (default)" }, Style::default().fg(theme().dim)),
+        ]));
         lines.push(Line::from(Span::styled("── notes.md ──", Style::default().fg(theme().border))));
         for l in r.notes_preview(16) {
             lines.push(Line::from(Span::styled(l, Style::default().fg(theme().muted))));
@@ -1796,6 +1821,140 @@ fn draw_confirm_quit(f: &mut Frame, app: &App) {
             Span::styled("N", Style::default().fg(theme().ok).add_modifier(Modifier::BOLD)),
         ])),
         inner,
+    );
+}
+
+fn draw_scope_prompt(f: &mut Frame, app: &App) {
+    let Some(p) = &app.scope_prompt else { return };
+    let t = theme();
+    let hosts = p.hosts.join(", ");
+    let verb = if p.hosts.len() == 1 { "is" } else { "are" };
+    let l1 = format!(" {hosts} {verb} outside this room's scope ({})", p.scope);
+    let w = (l1.chars().count() as u16 + 3).clamp(52, f.area().width.saturating_sub(4));
+    let area = centered(f.area(), w, 5);
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(t.warn))
+        .title(Span::styled(" ⊙ out of scope ", Style::default().fg(t.warn).add_modifier(Modifier::BOLD)))
+        .style(Style::default().bg(t.panel));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let k = |s: &str, c: Color| Span::styled(s.to_string(), Style::default().fg(c).add_modifier(Modifier::BOLD));
+    let d = |s: &str| Span::styled(s.to_string(), Style::default().fg(t.dim));
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(format!(" {hosts}"), Style::default().fg(t.warn).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" {verb} outside this room's scope "), Style::default().fg(t.fg)),
+                d(&format!("({})", p.scope)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(" run anyway?  ", Style::default().fg(t.fg)),
+                k("y", t.warn), d(" run once · "),
+                k("a", t.accent), d(" add to scope + run · "),
+                k("N", t.ok), d(" cancel"),
+            ]),
+        ])
+        .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn draw_scope(f: &mut Frame, app: &App) {
+    let t = theme();
+    let area = centered(f.area(), 70, 20);
+    f.render_widget(Clear, area);
+    let name = app.scope_edit.room.as_ref().map(|r| r.name.clone()).unwrap_or_default();
+    let sc = app.scope_edit_scope();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(t.accent2))
+        .title(Span::styled(format!(" ⊙ scope · {name} "), Style::default().fg(t.accent2).add_modifier(Modifier::BOLD)))
+        .title(Line::from(Span::styled(format!(" mode: {} ", app.scope_mode.as_str()), Style::default().fg(t.dim))).right_aligned())
+        .style(Style::default().bg(t.panel));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(3), Constraint::Length(3), Constraint::Length(2)])
+        .split(inner);
+    let origin = if sc.explicit {
+        "pinned in .ctfroom — only these hosts".to_string()
+    } else {
+        "default: the room's .target ip + host (+ HTB machine) — edit to pin".to_string()
+    };
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(format!(" {origin}"), Style::default().fg(t.dim))),
+            Line::from(Span::styled(" LHOST, loopback and this machine's addresses always pass", Style::default().fg(t.dim))),
+        ]),
+        rows[0],
+    );
+    if sc.entries.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "  no scope yet — every target counts as outside. a adds an IP, CIDR or hostname",
+                Style::default().fg(t.warn),
+            ))
+            .wrap(Wrap { trim: true }),
+            rows[1],
+        );
+    } else {
+        let items: Vec<ListItem> = sc
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let sel = i == app.scope_edit.idx;
+                let kind = match e {
+                    crate::scope::Addr::Net(ip, p) if (ip.is_ipv4() && *p < 32) || (ip.is_ipv6() && *p < 128) => "net",
+                    crate::scope::Addr::Net(..) => "ip",
+                    crate::scope::Addr::Host(h) if h.starts_with("*.") => "wildcard",
+                    crate::scope::Addr::Host(_) => "host",
+                };
+                ListItem::new(Line::from(vec![
+                    if sel {
+                        Span::styled(" ▎", Style::default().fg(crate::anim::pulse(app.tick)))
+                    } else {
+                        Span::raw("  ")
+                    },
+                    Span::styled(
+                        format!("{:<40}", e.to_string()),
+                        Style::default().fg(if sel { t.fg } else { t.subtle }).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
+                    ),
+                    Span::styled(kind, Style::default().fg(t.dim)),
+                ]))
+            })
+            .collect();
+        let mut state = ListState::default();
+        state.select(Some(app.scope_edit.idx.min(sc.entries.len() - 1)));
+        f.render_stateful_widget(List::new(items).highlight_style(Style::default().bg(t.sel_bg)), rows[1], &mut state);
+    }
+    let input = app.scope_edit.input.as_ref();
+    let field = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(if input.is_some() { t.border_hi } else { t.border }))
+        .title(Span::styled(" add ", Style::default().fg(t.dim)));
+    let content = match input {
+        Some(b) => Line::from(vec![
+            Span::styled(b.clone(), Style::default().fg(t.fg)),
+            Span::styled("▏", Style::default().fg(t.accent)),
+        ]),
+        None => Line::from(Span::styled("a: 10.10.11.0/24 · dc-2 · *.corp.local · dead:beef::/64", Style::default().fg(t.dim))),
+    };
+    f.render_widget(Paragraph::new(content).block(field), rows[2]);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " m cycles warn → confirm → strict · copies (⏎) are only warned",
+            Style::default().fg(t.dim),
+        ))
+        .wrap(Wrap { trim: true }),
+        rows[3],
     );
 }
 
@@ -2076,12 +2235,12 @@ fn draw_help(f: &mut Frame, app: &App) {
         row("z", "zoom the run tab fullscreen (bigger PTY)"),
         row("K / d / r", "kill job / close tab / re-run (restored too)"),
         Line::from(Span::styled(" ctf rooms + writeup", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD))),
-        row("c", "rooms: ⏎ use · n new · o notes · p mark thm/htb"),
+        row("c", "rooms: ⏎ use · n new · p thm/htb · s scope"),
         row("L", "loot: creds · ⏎ load vars · c crack hash"),
         row("g", "GTFOBins privesc lookup (offline)"),
         row("w", "add a writeup note to the log"),
         row("F / E", "capture flag → notes · export writeup (redacted)"),
-        row("o", "open active room's notes in $EDITOR"),
+        row("S / o", &format!("room scope (⊙ allowed hosts, {}) · o notes", app.scope_mode.as_str())),
         row("y / ^r", "history: ⏎ copy · x re-run · l log · / filter"),
         Line::from(Span::styled(
             "  copies auto-log · run tabs come back on launch (--fresh)",
