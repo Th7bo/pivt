@@ -53,6 +53,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::Htb => draw_htb(f, app),
         Mode::Export => draw_export(f, app),
         Mode::Theme => draw_theme_picker(f, app),
+        Mode::History => draw_history(f, app),
         _ => {}
     }
 
@@ -817,6 +818,8 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Mode::Gtfo => &[("type", "filter binary"), ("↑↓", "move"), ("⏎", "copy"), ("esc", "close")],
         Mode::Theme => &[("↑↓", "preview"), ("⏎", "keep"), ("r", "reload files"), ("esc", "revert")],
         Mode::Recipes => &[("↑↓", "move"), ("⏎", "run recipe"), ("A", "run all matched"), ("esc", "close")],
+        Mode::History if app.history_typing => &[("type", "filter"), ("↑↓", "move"), ("⏎/esc", "done")],
+        Mode::History => &[("↑↓", "move"), ("⏎", "copy"), ("x", "re-run"), ("l", "log"), ("/", "filter"), ("esc", "close")],
         Mode::Htb if app.htb_input.is_some() => &[("type", "answer"), ("⏎", "submit"), ("esc", "cancel")],
         Mode::Htb => &[("↑↓", "task"), ("⏎", "answer"), ("h", "hint"), ("m", "machine"), ("s/t", "spawn/stop"), ("r", "refresh"), ("esc", "close")],
         Mode::Normal => &[
@@ -940,6 +943,121 @@ fn draw_vars(f: &mut Frame, app: &App) {
     }
 
     f.render_widget(List::new(items), inner);
+}
+
+fn draw_history(f: &mut Frame, app: &App) {
+    use crate::history::Action;
+    let area = centered(f.area(), 104, 26);
+    f.render_widget(Clear, area);
+    let t = theme();
+    let place = app.active_room.as_ref().map(|r| r.name.clone()).unwrap_or_else(|| "no room".into());
+    let matches = app.history_matches();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(t.accent))
+        .title(Span::styled(format!(" history · {place} "), Style::default().fg(t.accent).add_modifier(Modifier::BOLD)))
+        .title(Line::from(Span::styled(format!(" {}/{} ", matches.len(), app.history.len()), Style::default().fg(t.dim))).right_aligned())
+        .style(Style::default().bg(t.panel));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1), Constraint::Length(3)])
+        .split(inner);
+
+    // filter line
+    let q: Line = if app.history_query.is_empty() && !app.history_typing {
+        Line::from(vec![
+            Span::styled(" / ", Style::default().fg(t.accent)),
+            Span::styled("filter by name, command, copy/run…", Style::default().fg(t.dim)),
+        ])
+    } else {
+        let mut v = vec![
+            Span::styled(" / ", Style::default().fg(t.accent)),
+            Span::styled(app.history_query.clone(), Style::default().fg(t.fg).add_modifier(Modifier::BOLD)),
+        ];
+        if app.history_typing {
+            v.push(Span::styled("▏", Style::default().fg(t.accent)));
+        }
+        Line::from(v)
+    };
+    f.render_widget(Paragraph::new(q), rows[0]);
+
+    if app.history.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "  nothing yet — every copy (⏎) and run (x) in this room is recorded here",
+                Style::default().fg(t.dim),
+            )),
+            rows[1],
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = matches
+        .iter()
+        .enumerate()
+        .map(|(row, &hi)| {
+            let e = &app.history[hi];
+            let sel = row == app.history_idx;
+            let mark = if sel {
+                Span::styled("▎", Style::default().fg(crate::anim::pulse(app.tick)))
+            } else {
+                Span::raw(" ")
+            };
+            let (act, act_color) = match e.action {
+                Action::Run => ("▶ run ", t.accent2),
+                _ => ("⧉ copy", t.muted),
+            };
+            let (exit, exit_color) = match (e.action, e.exit) {
+                (Action::Copy, _) => ("—".to_string(), t.dim),
+                (_, Some(0)) => ("✓ 0".to_string(), t.ok),
+                (_, Some(-1)) => ("✗ killed".to_string(), t.warn),
+                (_, Some(c)) => (format!("✗ {c}"), t.warn),
+                (_, None) if app.history_running(&e.run) => ("… running".to_string(), t.accent),
+                (_, None) => ("?".to_string(), t.dim),
+            };
+            let name: String = e.name.chars().take(30).collect();
+            let (glyph, cat_color) = category_style(e.category());
+            ListItem::new(Line::from(vec![
+                mark,
+                Span::styled(format!("{:<12}", e.short_time()), Style::default().fg(t.dim)),
+                Span::styled(format!("{act}  "), Style::default().fg(act_color)),
+                Span::styled(
+                    format!("{name:<31}"),
+                    Style::default()
+                        .fg(if sel { t.fg } else { t.subtle })
+                        .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
+                ),
+                Span::styled(format!("{exit:<10}"), Style::default().fg(exit_color)),
+                Span::styled(format!("{glyph} {}", e.category()), Style::default().fg(cat_color)),
+            ]))
+        })
+        .collect();
+    let mut state = ListState::default();
+    if !items.is_empty() {
+        state.select(Some(app.history_idx));
+    }
+    f.render_stateful_widget(List::new(items).highlight_style(Style::default().bg(t.sel_bg)), rows[1], &mut state);
+
+    f.render_widget(
+        Paragraph::new(Span::styled("─".repeat(rows[2].width as usize), Style::default().fg(t.border))),
+        rows[2],
+    );
+    // selected entry: the filled command + its log
+    if let Some(e) = app.history_selected() {
+        let mut lines = vec![Line::from(command_spans(&e.cmd))];
+        if let Some(l) = &e.log {
+            lines.push(Line::from(vec![
+                Span::styled("log ", Style::default().fg(t.dim)),
+                Span::styled(l.display().to_string().replace(&home_prefix(), "~"), Style::default().fg(t.muted)),
+                Span::styled("  l opens it", Style::default().fg(t.dim)),
+            ]));
+        }
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rows[3]);
+    }
 }
 
 fn draw_gtfo(f: &mut Frame, app: &App) {
@@ -1964,12 +2082,9 @@ fn draw_help(f: &mut Frame, app: &App) {
         row("w", "add a writeup note to the log"),
         row("F / E", "capture flag → notes · export writeup (redacted)"),
         row("o", "open active room's notes in $EDITOR"),
+        row("y / ^r", "history: ⏎ copy · x re-run · l log · / filter"),
         Line::from(Span::styled(
-            "  copies auto-log to the room · RHOST → sync_target_file (if on)",
-            Style::default().fg(theme().dim),
-        )),
-        Line::from(Span::styled(
-            "  workspace + run tabs come back on launch · pivt --fresh",
+            "  copies auto-log · run tabs come back on launch (--fresh)",
             Style::default().fg(theme().dim),
         )),
     ];

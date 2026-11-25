@@ -192,11 +192,29 @@ Read them with `less -R`. The command log links each run to its output, and
 `E` lists them all in the exported writeup. Logs and other files holding
 credentials are created `0600`. `PIVT_NO_LOG=1` turns logging off.
 
+## History (`y` / `Ctrl-r`)
+
+Every copy (`⏎`) and run (`x`, `r` in the run pane, recipe steps) is
+recorded per room in `<room>/.pivt/history.jsonl` (no room:
+`~/.config/pivt/session/history.jsonl`): time, command, the **filled**
+command line, copy or run, and for runs the exit code and job log path.
+The file is append-only JSON lines; an exit code is appended as its own
+record when the job ends, and lines pivt can't read are skipped. Filled
+commands can hold passwords, so it is `0600` in a `0700` directory.
+`PIVT_NO_LOG=1` turns it off along with the other logs.
+
+`y` (or `Ctrl-r`) opens it, newest first: time, copy/run, name, exit status
+(`✓ 0`, `✗ 2`, `✗ killed`, `… running`). `/` filters (fuzzy), `⏎` copies the
+filled command again, `x` re-runs it in a new tab (refused for target-side
+commands, missing tools or lines that still hold a `<PLACEHOLDER>`), and `l`
+opens its log in `$PAGER` (default `less -R`).
+
 ## Writeup export (`E`)
 
 `E` builds `writeup.md` in the room (no room: `~/.config/pivt/writeups/`)
-from the target info, the loot table, `notes.md`, the command log and links to
-the job logs. HTB forbids sharing solutions to active machines and THM's rules
+from the target info, the loot table, `notes.md`, a "Commands run" table from
+the history (each run with its exit code), the command log and links to the
+job logs. HTB forbids sharing solutions to active machines and THM's rules
 forbid publishing flags or walkthroughs for active content, so pivt asks first:
 
 - `n` / `⏎` (default): flags and credential values become `‹redacted›`, with

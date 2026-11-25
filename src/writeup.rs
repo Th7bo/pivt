@@ -176,6 +176,9 @@ pub struct ExportOpts {
     pub active_box: Option<String>,
     /// Extra values to scrub (PASS/HASH-style variables).
     pub secrets: Vec<String>,
+    /// The room's copy/run history (newest first): runs become the
+    /// "Commands run" table.
+    pub history: Vec<crate::history::Entry>,
 }
 
 /// Variables whose values are credentials (PASS, HASH, WPSCAN_TOKEN, …).
@@ -268,6 +271,30 @@ pub fn export(
             s.push_str(&scrub(&notes));
             s.push_str("\n\n");
         }
+    }
+
+    // runs from the history, oldest first, with their exit status
+    let runs: Vec<&crate::history::Entry> =
+        opts.history.iter().rev().filter(|e| e.action == crate::history::Action::Run).collect();
+    if !runs.is_empty() {
+        s.push_str("## Commands run\n\n| when | command | exit |\n|---|---|---|\n");
+        for e in runs {
+            let exit = match e.exit {
+                Some(0) => "0".to_string(),
+                Some(-1) => "killed".to_string(),
+                Some(c) => c.to_string(),
+                None => "?".to_string(),
+            };
+            let line = scrub(&e.cmd).replace('`', "'");
+            s.push_str(&format!(
+                "| {} | **{}** `{}` | {} |\n",
+                md_cell(&e.short_time()),
+                md_cell(&e.name),
+                md_cell(&line),
+                exit
+            ));
+        }
+        s.push('\n');
     }
 
     let log = log_path(active_room, target);
@@ -420,6 +447,26 @@ mod tests {
     use crate::room::Room;
 
     #[test]
+    fn export_lists_history_runs_redacted() {
+        use crate::history::{Action, Entry};
+        let dir = std::env::temp_dir().join(format!("pivt-test-hist-export-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let room = Room { name: "Box".into(), path: dir.clone() };
+        let mut run = Entry::new(Action::Run, "web/hydra ssh", "hydra ssh", "hydra -l admin -p 'S3cret!' ssh://10.0.0.1");
+        run.exit = Some(0);
+        let copy = Entry::new(Action::Copy, "web/curl verbose", "curl verbose", "curl -v http://x");
+        let opts = ExportOpts { secrets: vec!["S3cret!".into()], history: vec![copy, run], ..ExportOpts::default() };
+        let out = export(Some(&room), "10.0.0.1", "", "", &[], &opts).unwrap();
+        let w = std::fs::read_to_string(&out).unwrap();
+        assert!(w.contains("## Commands run"), "{w}");
+        assert!(w.contains("**hydra ssh**") && w.contains("| 0 |"), "{w}");
+        assert!(!w.contains("S3cret!"), "secret leaked: {w}");
+        assert!(!w.contains("curl verbose"), "copies aren't runs: {w}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn logs_command_into_room() {
         let dir = std::env::temp_dir().join(format!("pivt-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -513,6 +560,7 @@ mod tests {
             include_secrets: false,
             active_box: Some("Lame".into()),
             secrets: vec!["aad3b435:31d6cfe0d16ae931".into()],
+            history: vec![],
         };
         let out = export(Some(&room), "10.0.0.9", "", "", &creds, &opts).unwrap();
         assert_eq!(out, dir.join("writeup-PRIVATE.md"));

