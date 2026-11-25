@@ -89,6 +89,27 @@ tags = ["web", "wordpress"]
 
 [[command]]
 category = "web"
+name = "wpscan users"
+description = "Enumerate WordPress users (author IDs 1-50)"
+template = "wpscan --url <URL> --enumerate u1-50"
+tags = ["web", "wordpress", "users"]
+
+[[command]]
+category = "web"
+name = "wpscan password attack"
+description = "Brute-force WordPress logins: user list x password list"
+template = "wpscan --url <URL> --usernames <USERLIST> --passwords <WORDLIST>"
+tags = ["web", "wordpress", "brute"]
+
+[[command]]
+category = "web"
+name = "cewl wordlist"
+description = "Spider a site into a custom wordlist (depth 2, min 5 chars)"
+template = "cewl <URL> -d 2 -m 5 -w <FILE>"
+tags = ["web", "wordlist", "cewl"]
+
+[[command]]
+category = "web"
 name = "curl verbose"
 description = "Inspect raw response + headers"
 template = "curl -skiL <URL> -H 'User-Agent: Mozilla/5.0'"
