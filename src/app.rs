@@ -305,6 +305,9 @@ pub struct App {
     pub paths: Paths,
     /// The path settings as written in config.toml, saved back unchanged.
     path_cfg: (String, Option<String>, Option<String>),
+    /// Write config / loot / target files. Off in unit tests, which would
+    /// otherwise overwrite the real ~/.config/pivt/config.toml.
+    persist: bool,
 
     // persistent workspace session (src/session.rs); off for `pivt snap`
     pub session_on: bool,
@@ -335,6 +338,7 @@ impl App {
         let mut a = Self::build(crate::model::load_bundled_for_tests(), Config::default(), false);
         a.logging = false;
         a.paths.target_file = None; // never touch the real shell target file
+        a.persist = false;
         a
     }
 
@@ -496,6 +500,7 @@ impl App {
             last_rpc_tick: 0,
             paths,
             path_cfg,
+            persist: true,
             session_on: false,
             session_dir: None,
             session_sig: String::new(),
@@ -895,6 +900,9 @@ impl App {
     }
 
     pub fn persist_config(&self) {
+        if !self.persist {
+            return;
+        }
         let cfg = Config {
             vars: self.vars.clone(),
             favorites: self.favorites.clone(),
@@ -2040,6 +2048,9 @@ impl App {
         loot::loot_path(self.active_room.as_ref(), &target)
     }
     fn loot_persist(&self) {
+        if !self.persist {
+            return;
+        }
         loot::save(&self.loot_file(), &self.loot);
     }
     pub fn open_loot(&mut self) {
