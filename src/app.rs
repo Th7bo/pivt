@@ -10,7 +10,7 @@ use crate::model::*;
 use crate::ping::{Ping, Pinger};
 use crate::room::{self, Room};
 use crate::runner::RunJob;
-use crate::{clipboard, netif, writeup};
+use crate::{clipboard, netif, session, writeup};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use std::collections::BTreeMap;
@@ -136,6 +136,9 @@ pub const FAV_CAT: &str = "favorites";
 pub const RECENT_CAT: &str = "recent";
 pub const SUGGEST_CAT: &str = "suggested";
 const RECENT_MAX: usize = 25;
+/// Ticks between session change checks (~2s) and forced output saves (~30s).
+const SESSION_CHECK_TICKS: u64 = 40;
+const SESSION_FULL_TICKS: u64 = 600;
 
 /// A hashcat run started from the loot view, waiting for its tab to exit.
 pub struct PendingCrack {
@@ -263,6 +266,16 @@ pub struct App {
     /// Optional project URL for the "get pivt" presence button.
     pub discord_link: String,
     last_rpc_tick: u64,
+
+    // persistent workspace session (src/session.rs); off for `pivt snap`
+    pub session_on: bool,
+    /// Dir the session was last written to (changes with the active room).
+    session_dir: Option<PathBuf>,
+    /// session.toml as last written (saved_at zeroed), to skip no-op saves.
+    session_sig: String,
+    /// Per-tab (job id, output length, finished) as last written.
+    session_out: Vec<(u64, usize, bool)>,
+    session_full_tick: u64,
 
     matcher: SkimMatcherV2,
 }
@@ -394,6 +407,11 @@ impl App {
             discord_app_id,
             discord_link: cfg.discord_link.clone(),
             last_rpc_tick: 0,
+            session_on: false,
+            session_dir: None,
+            session_sig: String::new(),
+            session_out: Vec::new(),
+            session_full_tick: 0,
             matcher: SkimMatcherV2::default(),
         };
         app.refresh_categories();
@@ -435,6 +453,10 @@ impl App {
                 // compute the epoch once, here, so Discord's elapsed clock is stable
                 self.box_epoch = Some(crate::discord::now_unix());
             }
+        }
+        if self.session_on && self.tick.is_multiple_of(SESSION_CHECK_TICKS) {
+            let full = self.tick.saturating_sub(self.session_full_tick) >= SESSION_FULL_TICKS;
+            self.save_session(full);
         }
         // Rich Presence: refresh about every 5s (not every ~50ms tick).
         if self.discord.is_some()
@@ -1010,6 +1032,7 @@ impl App {
     }
     pub fn activate_selected_room(&mut self) {
         if let Some(r) = self.rooms.get(self.room_idx).cloned() {
+            self.leave_room_session();
             let tgt = r.read_target();
             self.active_room = Some(r.clone());
             if let Some((ip, host)) = tgt {
@@ -1058,6 +1081,7 @@ impl App {
         let host = self.new_room.host.trim().to_string();
         match room::scaffold(name, &ip, &host) {
             Ok(r) => {
+                self.leave_room_session();
                 self.active_room = Some(r.clone());
                 if !ip.is_empty() {
                     self.vars.insert("RHOST".into(), ip);
@@ -1403,6 +1427,235 @@ impl App {
             self.show_run = false;
             self.focus = Focus::Commands;
         }
+    }
+
+    /// Re-run the active tab's command in place (restored or finished tabs).
+    pub fn run_rerun_active(&mut self) {
+        let Some(job) = self.runs.get(self.run_tab) else {
+            self.set_status("no run tab to re-run");
+            return;
+        };
+        if job.is_running() {
+            self.set_status("still running — K to kill it first");
+            return;
+        }
+        let (title, cmd) = (job.title.clone(), job.cmd.clone());
+        // the room dir may be gone since the session was saved
+        let cwd = job.cwd.clone().filter(|d| d.is_dir());
+        let (rows, cols) = crate::runner::pane_size(self.run_fullscreen);
+        match RunJob::spawn(title.clone(), cmd.clone(), rows, cols, cwd.as_deref()) {
+            Ok(new) => {
+                if self.logging {
+                    let target = self.vars.get("RHOST").cloned().unwrap_or_default();
+                    writeup::log_command(self.active_room.as_ref(), &target, &title, "rerun", &cmd);
+                }
+                self.runs[self.run_tab] = new;
+                self.interacting = false;
+                self.set_status(format!("↻ re-running {title} · i to interact"));
+            }
+            Err(e) => self.set_status(format!("✗ spawn failed: {e}")),
+        }
+    }
+
+    // ── persistent session ──
+    /// Turn sessions on and bring back the last workspace (unless `fresh`).
+    /// The room comes from the cwd if pivt was started inside one, else from
+    /// the last active room.
+    pub fn restore_session(&mut self, fresh: bool) {
+        self.session_on = true;
+        if fresh {
+            self.set_status("fresh start — previous session not restored");
+            return;
+        }
+        if self.active_room.is_none() {
+            if let Some(path) = session::read_last_room().filter(|p| p.join(".ctfroom").exists()) {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
+                self.enter_room(Room { name, path });
+            }
+        }
+        let dir = session::dir_for(self.active_room.as_ref());
+        self.session_dir = Some(dir.clone());
+        match session::load(&dir) {
+            Ok(Some(s)) => self.apply_session(s),
+            Ok(None) => {}
+            Err(e) => self.set_status(format!("⚠ session ignored: {e}")),
+        }
+    }
+
+    /// Make `r` the active room the way startup does: target + loot follow it.
+    fn enter_room(&mut self, r: Room) {
+        if let Some((ip, host)) = r.read_target() {
+            self.vars.insert("RHOST".into(), ip);
+            if let Some(h) = host {
+                self.vars.insert("DOMAIN".into(), h);
+            }
+        }
+        self.active_room = Some(r);
+        self.loot = loot::load(&self.loot_file());
+        self.loot_idx = 0;
+    }
+
+    fn apply_session(&mut self, s: session::Session) {
+        self.suggested = s.suggested;
+        self.scan_services = s.scan_services;
+        self.refresh_categories();
+        self.search.clear();
+        self.cat_idx = self.categories.iter().position(|c| *c == s.category).unwrap_or(0);
+        self.cmd_idx = 0;
+        if let Some(ci) = self.command_by_key(&s.command) {
+            let pos = self.visible().iter().position(|&i| i == ci);
+            match pos {
+                Some(p) => self.cmd_idx = p,
+                None => {
+                    // not in that category (e.g. picked from search): go to its own
+                    let cat = self.commands[ci].category.clone();
+                    if let Some(c) = self.categories.iter().position(|x| *x == cat) {
+                        self.cat_idx = c;
+                        self.cmd_idx = self.visible().iter().position(|&i| i == ci).unwrap_or(0);
+                    }
+                }
+            }
+        }
+        self.clamp();
+
+        let (rows, cols) = crate::runner::pane_size(s.run_fullscreen);
+        let n = s.tabs.len();
+        for t in s.tabs {
+            let text = t.output.unwrap_or_default();
+            let exit = if t.running { None } else { t.exit };
+            self.runs.push(RunJob::restored(t.title, t.cmd, t.cwd, &text, t.running, exit, rows, cols));
+        }
+        self.run_tab = s.run_tab.min(self.runs.len().saturating_sub(1));
+        self.show_run = s.show_run && !self.runs.is_empty();
+        self.run_fullscreen = s.run_fullscreen && self.show_run;
+        self.focus = match s.focus.as_str() {
+            "commands" => Focus::Commands,
+            "preview" => Focus::Preview,
+            "run" if self.show_run => Focus::Run,
+            "run" => Focus::Commands,
+            _ => Focus::Categories,
+        };
+        // what we just loaded is what's on disk
+        self.session_sig = self.session_toml(&self.build_session(false));
+        self.session_out = self.runs.iter().map(|j| (j.id, j.raw_len(), j.finished)).collect();
+        self.session_full_tick = self.tick;
+
+        let when = session::age(s.saved_at, crate::discord::now_unix());
+        let mut msg = format!("↺ restored session ({when})");
+        if n > 0 {
+            msg.push_str(&format!(" · {n} tab{} · r re-runs in the run pane", if n == 1 { "" } else { "s" }));
+        }
+        self.set_status(msg);
+    }
+
+    /// Snapshot of the workspace. Tab output is attached only when `outputs`.
+    fn build_session(&self, outputs: bool) -> session::Session {
+        let skip = self.runs.len().saturating_sub(session::MAX_TABS);
+        let tabs = self
+            .runs
+            .iter()
+            .skip(skip)
+            .enumerate()
+            .map(|(i, j)| session::TabState {
+                title: j.title.clone(),
+                cmd: j.cmd.clone(),
+                cwd: j.cwd.clone(),
+                running: j.is_running() || j.restored == Some(true),
+                exit: if j.is_running() { None } else { j.exit },
+                file: session::tab_file(i),
+                output: outputs.then(|| session::trim_scrollback(&j.raw_text(), session::MAX_LINES)),
+            })
+            .collect();
+        let focus = match self.focus {
+            Focus::Categories => "categories",
+            Focus::Commands => "commands",
+            Focus::Preview => "preview",
+            Focus::Run => "run",
+        };
+        session::Session {
+            version: session::VERSION,
+            saved_at: 0,
+            room: self.active_room.as_ref().map(|r| r.path.clone()),
+            category: self.current_category().unwrap_or_default().to_string(),
+            command: self.selected_cmd().map(cmd_key).unwrap_or_default(),
+            focus: focus.into(),
+            show_run: self.show_run,
+            run_fullscreen: self.run_fullscreen,
+            run_tab: self.run_tab.saturating_sub(skip),
+            suggested: self.suggested.clone(),
+            scan_services: self.scan_services.clone(),
+            tabs,
+        }
+    }
+
+    fn session_toml(&self, s: &session::Session) -> String {
+        session::to_toml(s).unwrap_or_default()
+    }
+
+    /// Write the session if anything changed. Layout/selection changes are
+    /// written right away; a running tab's growing output only when `full`
+    /// (periodic + on quit). Finished tabs are written once they finish.
+    pub fn save_session(&mut self, full: bool) {
+        if !self.session_on {
+            return;
+        }
+        let dir = session::dir_for(self.active_room.as_ref());
+        if self.session_dir.as_ref() != Some(&dir) {
+            // new location: write everything there
+            self.session_dir = Some(dir.clone());
+            self.session_sig.clear();
+            self.session_out.clear();
+        }
+        let mut s = self.build_session(false);
+        let sig = self.session_toml(&s);
+        let skip = self.runs.len().saturating_sub(session::MAX_TABS);
+        let fps: Vec<(u64, usize, bool)> =
+            self.runs.iter().skip(skip).map(|j| (j.id, j.raw_len(), j.finished)).collect();
+        let mut dirty_out = false;
+        for (i, (t, fp)) in s.tabs.iter_mut().zip(&fps).enumerate() {
+            let old = self.session_out.get(i);
+            if old == Some(fp) {
+                continue;
+            }
+            // a different job in this slot, or it just finished: write now;
+            // a running job's growing output waits for the next full save
+            let moved = old.map(|o| o.0) != Some(fp.0);
+            let finished_now = old.map(|o| o.2) != Some(fp.2);
+            if full || moved || finished_now {
+                let raw: String = self.runs[skip + i].raw_text();
+                t.output = Some(session::trim_scrollback(&raw, session::MAX_LINES));
+                dirty_out = true;
+            }
+        }
+        if full {
+            self.session_full_tick = self.tick;
+        }
+        if sig == self.session_sig && !dirty_out {
+            return;
+        }
+        s.saved_at = crate::discord::now_unix();
+        match session::save(&dir, &s) {
+            Ok(()) => {
+                self.session_sig = sig;
+                // only tabs whose output went out are up to date on disk
+                let mut out = Vec::with_capacity(fps.len());
+                for (i, fp) in fps.iter().enumerate() {
+                    if s.tabs[i].output.is_some() {
+                        out.push(*fp);
+                    } else {
+                        out.push(self.session_out.get(i).copied().unwrap_or((0, usize::MAX, false)));
+                    }
+                }
+                self.session_out = out;
+                session::write_last_room(self.active_room.as_ref().map(|r| r.path.as_path()));
+            }
+            Err(e) => self.set_status(format!("⚠ session save failed: {e}")),
+        }
+    }
+
+    /// Before switching rooms: flush the workspace to the old room's session.
+    fn leave_room_session(&mut self) {
+        self.save_session(true);
     }
 
     /// Parse the active run tab's output for open ports, set PORTS (+URL), and

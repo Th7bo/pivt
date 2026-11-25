@@ -1,23 +1,36 @@
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 
 const SCROLLBACK: usize = 2000;
 const MAX_RAW: usize = 256 * 1024;
 
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+fn next_id() -> u64 {
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 /// A command running inside a real PTY. Output is fed to a vt100 parser so the
 /// run pane shows a proper terminal screen (colors, cursor, redraws); the
 /// master writer carries keystrokes back to the program (stdin).
+///
+/// A job restored from a saved session has no PTY at all: it only replays the
+/// saved output (`restored` is set) until it's re-run.
 pub struct RunJob {
+    /// Unique per job (process-wide), so session saves can tell tabs apart.
+    pub id: u64,
     pub title: String,
     pub cmd: String,
+    pub cwd: Option<PathBuf>,
+    /// `Some(was_running)` for a dead tab brought back from a saved session.
+    pub restored: Option<bool>,
     parser: Arc<Mutex<vt100::Parser>>,
     raw: Arc<Mutex<String>>,
-    writer: Box<dyn Write + Send>,
-    master: Box<dyn MasterPty + Send>,
+    writer: Option<Box<dyn Write + Send>>,
+    master: Option<Box<dyn MasterPty + Send>>,
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
     eof: Arc<AtomicBool>,
     pub exit: Option<i32>,
@@ -90,12 +103,15 @@ impl RunJob {
         }
 
         Ok(RunJob {
+            id: next_id(),
             title,
             cmd,
+            cwd: cwd.map(Path::to_path_buf),
+            restored: None,
             parser,
             raw,
-            writer,
-            master: pair.master,
+            writer: Some(writer),
+            master: Some(pair.master),
             child: Some(child),
             eof,
             exit: None,
@@ -106,6 +122,48 @@ impl RunJob {
         })
     }
 
+    /// A finished, PTY-less tab showing `text` saved by a previous session.
+    /// `exit` is the recorded exit code (None if it was still running).
+    #[allow(clippy::too_many_arguments)]
+    pub fn restored(
+        title: impl Into<String>,
+        cmd: impl Into<String>,
+        cwd: Option<PathBuf>,
+        text: &str,
+        was_running: bool,
+        exit: Option<i32>,
+        rows: u16,
+        cols: u16,
+    ) -> RunJob {
+        let rows = rows.max(4);
+        let cols = cols.max(20);
+        let mut parser = vt100::Parser::new(rows, cols, SCROLLBACK);
+        if !text.is_empty() {
+            parser.process(text.replace('\n', "\r\n").as_bytes());
+            parser.process(b"\r\n");
+        }
+        let note = if was_running { "restored · was running" } else { "restored" };
+        parser.process(format!("\x1b[2m── {note} · r re-runs ──\x1b[0m").as_bytes());
+        RunJob {
+            id: next_id(),
+            title: title.into(),
+            cmd: cmd.into(),
+            cwd,
+            restored: Some(was_running),
+            parser: Arc::new(Mutex::new(parser)),
+            raw: Arc::new(Mutex::new(text.to_string())),
+            writer: None,
+            master: None,
+            child: None,
+            eof: Arc::new(AtomicBool::new(true)),
+            exit,
+            finished: true,
+            scroll: 0,
+            rows,
+            cols,
+        }
+    }
+
     pub fn parser(&self) -> Option<MutexGuard<'_, vt100::Parser>> {
         self.parser.lock().ok()
     }
@@ -113,6 +171,11 @@ impl RunJob {
     /// Full captured output (ANSI stripped) for parsing.
     pub fn raw_text(&self) -> String {
         self.raw.lock().map(|r| r.clone()).unwrap_or_default()
+    }
+
+    /// Size of the captured output, a cheap "has it changed" fingerprint.
+    pub fn raw_len(&self) -> usize {
+        self.raw.lock().map(|r| r.len()).unwrap_or(0)
     }
 
     pub fn poll(&mut self) {
@@ -143,8 +206,10 @@ impl RunJob {
         }
         // typing resumes tail-follow
         self.set_scroll(0);
-        let _ = self.writer.write_all(bytes);
-        let _ = self.writer.flush();
+        if let Some(w) = self.writer.as_mut() {
+            let _ = w.write_all(bytes);
+            let _ = w.flush();
+        }
     }
 
     pub fn kill(&mut self) {
@@ -165,7 +230,9 @@ impl RunJob {
         }
         self.rows = rows;
         self.cols = cols;
-        let _ = self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+        if let Some(m) = &self.master {
+            let _ = m.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+        }
         if let Ok(mut p) = self.parser.lock() {
             p.set_size(rows, cols);
         }
@@ -305,5 +372,18 @@ mod tests {
             std::thread::sleep(Duration::from_millis(25));
         }
         assert_eq!(j.exit, Some(3));
+    }
+
+    #[test]
+    fn restored_job_replays_text() {
+        let mut j = RunJob::restored("t", "id", None, "uid=0(root)\n22/tcp open ssh", false, Some(0), 8, 40);
+        j.poll();
+        j.write_input(b"ignored");
+        j.kill();
+        assert!(!j.is_running());
+        assert_eq!(j.exit, Some(0));
+        assert_eq!(j.raw_text(), "uid=0(root)\n22/tcp open ssh");
+        let text = screen_text(&j);
+        assert!(text.contains("uid=0(root)") && text.contains("restored"), "screen:\n{text}");
     }
 }

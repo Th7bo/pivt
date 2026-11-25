@@ -12,6 +12,7 @@ mod ping;
 mod recipe;
 mod room;
 mod runner;
+mod session;
 mod theme;
 mod ui;
 mod writeup;
@@ -39,13 +40,17 @@ fn main() -> io::Result<()> {
     install_panic_hook();
     let mut terminal = setup()?;
     let mut app = App::new();
+    // `--fresh` skips restoring the last workspace (it's overwritten on the next save)
+    app.restore_session(args.iter().any(|a| a == "--fresh"));
     let res = run(&mut terminal, &mut app);
     restore(&mut terminal)?;
+    app.save_session(true);
     app.persist_config();
     res
 }
 
 /// Headless render for development/screenshots: `pivt snap splash:8` or `pivt snap normal`.
+/// Never loads or saves the persistent session, so screenshots stay clean.
 fn snapshot(what: &str) {
     use ratatui::backend::TestBackend;
     let mut app = App::new();
@@ -165,6 +170,27 @@ fn snapshot(what: &str) {
             app.add.field = 3;
         }
         "help" => app.mode = Mode::Help,
+        "restored" => {
+            // dead tabs as they come back from a saved session
+            app.mode = Mode::Normal;
+            let (r, c) = (18, 100);
+            app.runs.push(runner::RunJob::restored(
+                "nmap quick",
+                "nmap -T4 --top-ports 1000 10.10.11.42",
+                None,
+                "Starting Nmap 7.95\nNmap scan report for 10.10.11.42\nPORT    STATE SERVICE\n22/tcp  open  ssh\n80/tcp  open  http\nNmap done: 1 IP address scanned",
+                false,
+                Some(0),
+                r,
+                c,
+            ));
+            app.runs.push(runner::RunJob::restored(
+                "listener", "nc -lvnp 4444", None, "listening on [any] 4444 ...", true, None, r, c,
+            ));
+            app.show_run = true;
+            app.focus = Focus::Run;
+            app.status = "↺ restored session (14h ago) · 2 tabs · r re-runs in the run pane".into();
+        }
         s if s.starts_with("htb-live:") => {
             // Real API, read-only: load a machine and render the panel.
             app.htb.load(Some(s["htb-live:".len()..].to_string()), None);
@@ -756,6 +782,7 @@ fn run_focus_keys(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Right | KeyCode::Char(']') => app.run_tab_next(),
         KeyCode::Char('K') => app.run_kill_active(),
         KeyCode::Char('d') => app.run_close_active(),
+        KeyCode::Char('r') => app.run_rerun_active(),
         KeyCode::Char('g') => app.run_tail(),
         KeyCode::Char('z') => app.toggle_run_fullscreen(),
         KeyCode::Char('i') | KeyCode::Enter => app.begin_interact(),

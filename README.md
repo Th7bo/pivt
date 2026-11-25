@@ -37,6 +37,24 @@ Run `pivt`, press `?` for keybinds. Add your own commands in
 
 Screenshots are rendered headlessly:
 `PIVT_SNAP_ANSI=1 pivt snap normal > s.txt && python3 scripts/ansi2png.py s.txt s.png`.
+`snap` never reads or writes the saved session.
+
+## Sessions
+
+Close pivt and reopen it tomorrow: the workspace comes back. That covers the
+active room, the selected category and command, the focused pane, the run
+pane's visibility and zoom, the last parsed scan's ✸ suggestions, and every
+run tab (up to 12, last 2000 lines of output each). Processes don't survive a
+restart, so tabs come back dead and marked `restored · exited` or
+`restored · was running`. Press `r` in the run pane to run that tab's command
+again in its original directory. `r` also re-runs any finished tab.
+
+The session is saved every ~30s, on changes and on quit. With a room active
+it lives in `<room>/.pivt/session.toml` plus `<room>/.pivt/scrollback/`,
+otherwise in `~/.config/pivt/session/`. Started from outside any room, pivt
+returns to the last active room. `pivt --fresh` starts clean (the old session
+is overwritten on the next save). An unreadable or other-version session file
+is ignored with a status message.
 
 ## Hack The Box (`H`)
 

@@ -252,7 +252,11 @@ fn draw_run(f: &mut Frame, app: &App, area: Rect) {
         .split(inner);
     let bar = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(10), Constraint::Length(18)])
+        // restored badges ("restored · was running") need more room
+        .constraints([
+            Constraint::Min(10),
+            Constraint::Length(if app.active_run().is_some_and(|j| j.restored.is_some()) { 28 } else { 18 }),
+        ])
         .split(rows[0]);
 
     // tab bar
@@ -261,6 +265,8 @@ fn draw_run(f: &mut Frame, app: &App, area: Rect) {
         let active = i == app.run_tab;
         let (glyph, gcol) = if job.is_running() {
             ("●", crate::anim::pulse(app.tick))
+        } else if job.restored.is_some() {
+            ("◌", DIM)
         } else if job.exit == Some(0) {
             ("✓", OK)
         } else {
@@ -285,6 +291,13 @@ fn draw_run(f: &mut Frame, app: &App, area: Rect) {
     if let Some(job) = app.active_run() {
         let badge = if job.is_running() {
             Span::styled(" running ", Style::default().fg(BG).bg(crate::anim::pulse(app.tick)))
+        } else if let Some(was_running) = job.restored {
+            let what = match (was_running, job.exit) {
+                (true, _) => "was running".to_string(),
+                (false, Some(0)) | (false, None) => "exited".to_string(),
+                (false, Some(c)) => format!("exit {c}"),
+            };
+            Span::styled(format!(" restored · {what} "), Style::default().fg(BG).bg(ACCENT2))
         } else if job.exit == Some(0) {
             Span::styled(" exit 0 ", Style::default().fg(BG).bg(OK))
         } else {
@@ -727,11 +740,15 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     // run-pane focus has its own hint set
     if app.mode == Mode::Normal && app.focus == Focus::Run {
+        let zoom = if app.run_fullscreen { "unzoom" } else { "zoom" };
         let pairs: &[(&str, &str)] = if app.interacting {
             &[("⌨", "typing → program"), ("F12", "detach")]
+        } else if app.active_run().is_some_and(|j| !j.is_running()) {
+            // finished / restored tab: nothing to type into, offer a re-run
+            &[("r", "re-run"), ("z", zoom), ("↑↓", "scroll"), ("←→", "tab"), ("d", "close"), ("g", "tail")]
         } else {
             &[
-                ("i", "interact"), ("z", if app.run_fullscreen { "unzoom" } else { "zoom" }),
+                ("i", "interact"), ("z", zoom),
                 ("↑↓", "scroll"), ("←→", "tab"), ("K", "kill"), ("d", "close"), ("g", "tail"),
             ]
         };
@@ -1747,7 +1764,7 @@ fn draw_help(f: &mut Frame) {
         row("i / ⏎", "interact (type into it) · F12 detach"),
         row("↑↓", "scroll · ←→ switch tab · g tail"),
         row("z", "zoom the run tab fullscreen (bigger PTY)"),
-        row("K / d", "kill job / close tab"),
+        row("K / d / r", "kill job / close tab / re-run (restored too)"),
         Line::from(Span::styled(" ctf rooms + writeup", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD))),
         row("c", "rooms: pick/activate, n=new, o=notes"),
         row("L", "loot: creds · ⏎ load vars · c crack hash"),
@@ -1756,11 +1773,11 @@ fn draw_help(f: &mut Frame) {
         row("F / E", "capture flag → notes · export writeup.md"),
         row("o", "open active room's notes in $EDITOR"),
         Line::from(Span::styled(
-            "  copies auto-log to the room (or ~/.config/pivt/writeups).",
+            "  copies auto-log to the room · RHOST syncs with `target`.",
             Style::default().fg(DIM),
         )),
         Line::from(Span::styled(
-            "  RHOST syncs with your `target` shell command.",
+            "  workspace + run tabs come back on launch · pivt --fresh",
             Style::default().fg(DIM),
         )),
     ];
