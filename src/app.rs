@@ -214,6 +214,8 @@ pub struct App {
     pub run_tab: usize,
     pub show_run: bool,
     pub run_fullscreen: bool,
+    /// Output dirs the last spawn created (for the status line).
+    made_dirs: Vec<String>,
     pub interacting: bool, // keystrokes go to the focused job's PTY
 
     // loot / creds
@@ -423,6 +425,7 @@ impl App {
             run_tab: 0,
             show_run: false,
             run_fullscreen: false,
+            made_dirs: Vec::new(),
             interacting: false,
             loot,
             loot_idx: 0,
@@ -1233,8 +1236,13 @@ impl App {
             return;
         }
         self.show_runs_from(first_new);
+        let made = if self.made_dirs.is_empty() {
+            String::new()
+        } else {
+            format!(" · created {}", self.made_dirs.join(" "))
+        };
         self.set_status(format!(
-            "▶ running {} ({spawned} tab{}) · i to interact",
+            "▶ running {} ({spawned} tab{}){made} · i to interact",
             cmd.name,
             if spawned == 1 { "" } else { "s" }
         ));
@@ -1253,8 +1261,13 @@ impl App {
         let (rows, cols) = crate::runner::pane_size(self.run_fullscreen);
         let cwd = self.active_room.as_ref().map(|r| r.path.clone());
         let mut spawned = 0;
+        let mut made: Vec<String> = Vec::new();
         for (i, step) in steps.iter().enumerate() {
             let filled = fill_template(step, &self.vars);
+            // `-oN nmap/…` etc. need their dir, in the room or wherever pivt runs
+            if let Some(dir) = cwd.clone().or_else(|| std::env::current_dir().ok()) {
+                made.extend(crate::runner::prepare_output_dirs(&filled, &dir));
+            }
             let title = if multi {
                 format!("{} [{}]", cmd.name, i + 1)
             } else {
@@ -1276,6 +1289,7 @@ impl App {
             self.push_recent(cmd_key(cmd));
             self.persist_config();
         }
+        self.made_dirs = made;
         spawned
     }
 
@@ -1559,6 +1573,9 @@ impl App {
         }
         // the room dir may be gone since the session was saved
         let cwd = job.cwd.clone().filter(|d| d.is_dir());
+        if let Some(dir) = cwd.clone().or_else(|| std::env::current_dir().ok()) {
+            crate::runner::prepare_output_dirs(&cmd, &dir);
+        }
         let (rows, cols) = crate::runner::pane_size(self.run_fullscreen);
         match RunJob::spawn(title.clone(), cmd.clone(), rows, cols, cwd.as_deref()) {
             Ok(new) => {

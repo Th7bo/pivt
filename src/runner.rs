@@ -325,6 +325,52 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// Flags whose next argument is a file the command writes.
+const OUT_FLAGS: &[&str] = &["-oN", "-oA", "-oG", "-oX", "-oS", "-o", "-O", "--output", "--outfile", "--output-file"];
+
+/// Relative directories a command line writes into (`-oN nmap/quick.txt`,
+/// `> loot/x.hash`, `--output=out/r.json`). Absolute, `~`/`$`-prefixed,
+/// quoted and `..` paths are left alone.
+pub fn output_dirs(cmd: &str) -> Vec<PathBuf> {
+    let toks: Vec<&str> = cmd.split_whitespace().collect();
+    let mut out: Vec<PathBuf> = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        let path = if OUT_FLAGS.contains(t) || *t == ">" || *t == ">>" {
+            toks.get(i + 1).copied()
+        } else if let Some(p) = t.strip_prefix(">>").or_else(|| t.strip_prefix('>')) {
+            Some(p)
+        } else {
+            OUT_FLAGS.iter().filter(|f| f.starts_with("--")).find_map(|f| t.strip_prefix(&format!("{f}=")))
+        };
+        let Some(path) = path.map(|p| p.trim_end_matches(';')) else { continue };
+        let bad = path.is_empty()
+            || path.starts_with(['/', '~', '$', '\'', '"', '-', '&'])
+            || path.split('/').any(|c| c == "..");
+        if bad {
+            continue;
+        }
+        if let Some(parent) = Path::new(path).parent().filter(|p| !p.as_os_str().is_empty()) {
+            if !out.iter().any(|o| o == parent) {
+                out.push(parent.to_path_buf());
+            }
+        }
+    }
+    out
+}
+
+/// Create the relative output dirs `cmd` writes into under `cwd`, so
+/// `nmap -oN nmap/quick.txt` works outside a room too. Returns the ones made.
+pub fn prepare_output_dirs(cmd: &str, cwd: &Path) -> Vec<String> {
+    let mut made = Vec::new();
+    for d in output_dirs(cmd) {
+        let full = cwd.join(&d);
+        if !full.is_dir() && std::fs::create_dir_all(&full).is_ok() {
+            made.push(format!("{}/", d.display()));
+        }
+    }
+    made
+}
+
 /// Approximate the run pane's inner (rows, cols) from the current terminal size,
 /// matching the layout in ui.rs (bottom ~42% of the body, minus borders).
 pub fn pane_size(fullscreen: bool) -> (u16, u16) {
@@ -391,6 +437,26 @@ mod tests {
         assert!(raw.is_running(), "^C/^Z killed or stopped the raw-pty job");
         assert!(screen_text(&raw).contains("alive"), "input not passed through:\n{}", screen_text(&raw));
         raw.kill();
+    }
+
+    #[test]
+    fn finds_relative_output_dirs() {
+        let p = |v: &[&str]| v.iter().map(PathBuf::from).collect::<Vec<_>>();
+        assert_eq!(output_dirs("nmap -sC -sV 10.0.0.1 -oN nmap/quick.txt"), p(&["nmap"]));
+        assert_eq!(output_dirs("nmap -p- -oA nmap/full 10.0.0.1"), p(&["nmap"]));
+        assert_eq!(output_dirs("ssh2john id_rsa > loot/hashes/key.hash"), p(&["loot/hashes"]));
+        assert_eq!(output_dirs("x >>logs/a.txt; y --output=out/r.json"), p(&["logs", "out"]));
+        // inputs, absolute, home, parent and bare-name outputs are left alone
+        assert!(output_dirs("ffuf -w lists/x.txt -u http://h/FUZZ").is_empty());
+        assert!(output_dirs("curl http://x/f -o /tmp/f").is_empty());
+        assert!(output_dirs("x -o ~/f/g; y > ../z/w; z > $HOME/q/r; w -o shell.elf 2>/dev/null").is_empty());
+        let d = std::env::temp_dir().join(format!("pivt-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(prepare_output_dirs("nmap -oN nmap/q.txt h; x > loot/a/b.txt", &d), vec!["nmap/", "loot/a/"]);
+        assert!(d.join("nmap").is_dir() && d.join("loot/a").is_dir());
+        assert!(prepare_output_dirs("nmap -oN nmap/q.txt h", &d).is_empty(), "already there");
+        std::fs::remove_dir_all(&d).ok();
     }
 
     #[test]
