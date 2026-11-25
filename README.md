@@ -97,7 +97,7 @@ Main view:
 | `notes` | `o` | open room notes in `$EDITOR` |
 | `loot` | `L` | loot / creds |
 | `favorite` | `f` | pin / unpin favorite |
-| `bg` | `b` | cycle background: stars / flow / off ([look](#look--motion)) |
+| `bg` | `b` | cycle background: stars / flow / matrix / snow / plasma / off ([animations](#animations)) |
 | `theme` / `theme_picker` | `t` / `T` | next theme / theme picker |
 | `settings` | `,` | [settings screen](#settings-) |
 | `discord` / `discord_privacy` | `D` / `M` | Discord presence on/off / privacy |
@@ -284,36 +284,160 @@ nmap = "N"                     # shorthand: glyph only
 
 | key | default | values | |
 |---|---|---|---|
-| `background` | `"stars"` | `stars` `flow` `off` | effect behind the UI; `b` cycles it and saves it here (the old `flow_bg = true` still means flow when this isn't set) |
-| `bg_density` | `5` | 1–10 | more stars / more flow cells |
-| `bg_slowdown` | `1` | 1–10 | tick divisor: 2 = half speed |
-| `flow_charset` | `"classic"` | `classic` ` .,:;-=+*x#%@` · `blocks` `░▒▓█` · `dots` `·•●` · `ascii` (a 68-char ramp) · `braille` `⠁⠃⠇⡇⣇⣧⣷⣿`, or your own string (2–96 single-width chars, faint → dense) | flow field ramp |
-| `star_glyphs` | `"classic"` | `classic` · `dots` `·∙•●` · `ascii` `.+*` · `sparkle` `·✧✦`, or your own (1–12 chars, dim → bright) | starfield glyphs |
-| `ripple` | `true` | bool | mouse ripple in the flow field (off also releases the mouse unless the run pane is open) |
 | `splash` | `true` | bool | startup splash (`PIVT_NO_SPLASH=1` / `--no-splash` still skip it) |
 | `splash_hold` | `true` | bool | wait for a key; `false` = continue after `splash_seconds` |
 | `splash_seconds` | `3` | 1–30 | auto-continue delay |
-| `animations` | `true` | bool | pulse, twinkle, drift, shooting stars, flag burst ring, typewriter splash |
 | `border` | `"rounded"` | `rounded` `plain` `double` `thick` `none` | border style (`none`: panes lose their borders, popups draw plain lines) |
 | `marker` | `"bar"` | `bar` `▎` · `arrow` `▸` · `dot` `•` · `chevron` `›`, or any one single-width character | selected-row marker |
+
+The background, motion and splash options are listed under
+[Animations](#animations).
 
 `[look.categories]` overrides the theme's category colour and the built-in
 glyph, by category name. A colour is `#rrggbb` / `#rgb` or a theme role name
 (`accent`, `accent2`, `ok`, `warn`, `gold`, `orange`, …, see
 [custom themes](#custom-themes)), so role colours follow theme switches.
 
-With `animations = false` everything stands still (steady accent, frozen
-background, static splash) and pivt stops repainting at 20 fps: it redraws on
-input, on new job output, when the ping state changes, and once a second for
-the box timer. Handy on slow SSH links or if motion is distracting.
-
 `pivt snap <view> --size 80x24` (or `PIVT_SNAP_SIZE=80x24`) renders any of
 this headlessly at a given size.
+
+## Animations
+
+Everything that moves is tunable, all under `[look]` (same lenient rules:
+unknown keys and bad values are skipped with a warning, numbers out of range
+are clamped, and only what you set is written back). In the settings screen
+(`,`) they're in the **Background** and **Animations** sections.
+
+```toml
+[look]
+background = "matrix"     # stars · flow · matrix · snow · plasma · off
+fps = 30
+matrix_charset = "binary"
+star_parallax = true
+shoot_angle = "random"
+burst_style = "confetti"
+burst_text = "{which} on {BOX} 🏁"
+splash_banner = "file"
+splash_file = "~/.config/pivt/splash.txt"
+splash_reveal = "scanline"
+splash_bg = "plasma"
+```
+
+**Global.** `animations = false` is the master switch and beats every option
+below: everything stands still (steady accent, frozen background, finished
+splash, no burst animation) and pivt stops repainting every frame; it
+redraws on input, on new job output, when the ping state changes, and once a
+second for the box timer. Handy on slow SSH links or if motion is
+distracting.
+
+| key | default | values | |
+|---|---|---|---|
+| `animations` | `true` | bool | master switch (see above) |
+| `fps` | `20` | 5–60 | frame rate cap. Timers, job polling, session saves, presence and the ping are on wall-clock time, so they keep their pace at any rate |
+
+**Background.** Drawn under the UI: only empty cells show it, and the
+in-app versions are kept faint so text stays readable (the splash uses a
+louder version of the same effect). The mouse is captured only for the flow
+ripple (and the run pane), so text selection keeps working otherwise.
+
+| key | default | values | |
+|---|---|---|---|
+| `background` | `"stars"` | `stars` `flow` `matrix` `snow` `plasma` `off` | effect behind the UI; `b` cycles it and saves it here (the old `flow_bg = true` still means flow when this isn't set) |
+| `bg_density` | `5` | 1–10 | starfield / flow density |
+| `bg_slowdown` | `1` | 1–10 | background clock divisor: 2 = half speed |
+| `star_glyphs` | `"classic"` | `classic` · `dots` `·∙•●` · `ascii` `.+*` · `sparkle` `·✧✦`, or your own (1–12 chars, dim → bright) | starfield glyphs |
+| `star_twinkle` | `5` | 1–10 | twinkle rate |
+| `star_twinklers` | `12` | 0–100 % | share of stars that twinkle (the splash: twice that) |
+| `star_drift` | `"up"` | `up` `down` `left` `right` `none` | drift direction (in-app; the splash field holds still) |
+| `star_speed` | `5` | 1–10 | drift speed (5 ≈ one row per 0.8 s) |
+| `star_brightness` | `5` | 1–10 | darker toward the background / brighter toward the theme's brightest star colour |
+| `star_parallax` | `false` | bool | three depth layers: far (dense, slow, dim) to near (sparse, fast, bright) |
+| `star_color` | `"theme"` | `theme` `accent` `category` | theme star ramp, tinted toward the accent, or toward the selected category's hue |
+| `flow_charset` | `"classic"` | `classic` ` .,:;-=+*x#%@` · `blocks` `░▒▓█` · `dots` `·•●` · `ascii` (a 68-char ramp) · `braille` `⠁⠃⠇⡇⣇⣧⣷⣿`, or your own string (2–96 single-width chars, faint → dense) | flow field ramp |
+| `flow_scale` | `5` | 1–10 | zoom: higher = bigger swirls |
+| `flow_speed` | `5` | 0–10 | 0 = frozen |
+| `flow_angle` | `203` | 0–359 ° (`←`/`→` step 15) | drift heading, 0 = right, 90 = up (203 is the original left-and-a-bit-down) |
+| `flow_octaves` | `3` | 1–5 | turbulence (fbm noise octaves) |
+| `flow_wave` | `3` | 0–10 | amplitude of the slow transverse wave |
+| `flow_contrast` | `5` | 1–10 | contrast |
+| `flow_cutoff` | `5` | 0–10 | higher = more blank cells |
+| `flow_color` | `"category"` | `theme` `category` `rainbow` | theme ramp, tinted toward the selected category, or cycling through the theme's category hues over time |
+| `ripple` | `true` | bool | mouse ripple in the flow field (off also releases the mouse unless the run pane is open) |
+| `ripple_strength` | `5` | 0–10 | |
+| `ripple_radius` | `5` | 1–10 | |
+| `ripple_speed` | `5` | 1–10 | |
+| `matrix_charset` | `"katakana"` | `katakana` (half-width) `ascii` `binary` `hex` | matrix rain glyphs |
+| `matrix_speed` | `5` | 1–10 | fall speed |
+| `matrix_density` | `5` | 1–10 | how many columns rain |
+| `snow_density` | `5` | 1–10 | flakes (two depth layers) |
+| `snow_speed` | `5` | 1–10 | fall speed |
+| `snow_wind` | `1` | -5–5 | negative blows left |
+| `plasma_charset` | `"classic"` | the `flow_charset` presets, or your own | plasma ramp |
+| `plasma_scale` | `5` | 1–10 | zoom: higher = bigger blobs |
+| `plasma_speed` | `5` | 1–10 | |
+| `plasma_density` | `5` | 1–10 | how much of the field shows (in-app only the crests) |
+
+**Effects.**
+
+| key | default | values | |
+|---|---|---|---|
+| `shoot` | `true` | bool | shooting stars over the starfield |
+| `shoot_every` | `13` | 2–120 s | time between streaks (the splash: a sixth of it) |
+| `shoot_angle` | `"right"` | `right` `left` `down-right` `down-left` `up-right` `up-left` `down` `random` | heading (`random` picks one per streak) |
+| `shoot_length` | `4` | 2–20 cells | trail length |
+| `shoot_speed` | `5` | 1–10 | 5 crosses the screen in about half a second |
+| `shoot_trail` | `"classic"` | `classic` `✦━─·` · `dots` `●•·.` · `sparkle` `✦✧*·` · `ascii` `*=-.` · `comet` `✦✧⋆∙·`, or your own (1–12 chars, head first) | trail glyphs, stretched over the length |
+| `shoot_color` | `"auto"` | `auto` or a theme role: `accent` `accent2` `accent_hi` `ok` `warn` `gold` `orange` `fg` `star_hi` `star_mid` `border_hi` `htb` | head colour, the trail fades from it (`auto`: the original star colours) |
+| `pulse` | `true` | bool | the selected-row marker pulses (off = steady `pulse_from`) |
+| `pulse_speed` | `5` | 1–10 | 5 = one beat per 0.6 s |
+| `pulse_from` | `"accent"` | a theme role (as above, without `auto`) | resting colour |
+| `pulse_to` | `"accent_hi"` | a theme role | peak colour |
+| `burst` | `true` | bool | the flag-capture celebration (off = no animation, no banner) |
+| `burst_style` | `"ring"` | `ring` `sparkle` `confetti` | shockwave ring, a sparkle explosion, or falling confetti in the theme's category colours |
+| `burst_ms` | `1500` | 300–10000 ms (`←`/`→` step 100) | how long it lasts |
+| `burst_text` | `"{WHICH} PWNED"` | text, up to 40 chars | banner: `{WHICH}` / `{which}` (USER / user, ROOT / root), `{BOX}` (RHOST), `{ROOM}`, `{N}` (flags captured); or just your own words |
+| `burst_flash` | `true` | bool | the banner flashes |
+
+**Splash.** (`splash`, `splash_hold` and `splash_seconds` are in
+[Look](#look--motion); these take effect at the next start.)
+
+| key | default | values | |
+|---|---|---|---|
+| `splash_banner` | `"pivt"` | `pivt` `file` `text` | the built-in PIVT art, `splash_file`, or `splash_text` |
+| `splash_file` | `""` | path (`~/` ok) | ASCII art file: up to 120 rows × 400 columns are kept, tabs become 4 spaces, ANSI colour codes are dropped, and it's clipped to the terminal. Missing or empty → the built-in banner and a startup warning |
+| `splash_text` | `""` | up to 16 chars | your own banner text |
+| `splash_font` | `"block"` | `block` `plain` | `splash_text` in a built-in 5-row block font (A–Z, 0–9, `- ! ? . _ : / +`), or as one letter-spaced line |
+| `splash_subtitle` | `"ctf toolkit"` | up to 40 chars, empty = none | letter-spaced when it fits |
+| `splash_reveal` | `"typewriter"` | `typewriter` `fade` `scanline` `instant` | left to right with a glowing edge, cells fading in at random, rows top to bottom, or all at once |
+| `splash_reveal_speed` | `5` | 1–10 | 5 = 0.75 s |
+| `splash_bg` | `"same"` | `same` `stars` `flow` `matrix` `snow` `plasma` `off` | background behind the splash (`same` = `background`) |
+
+A custom splash file is plain text, drawn centred in the accent colour.
+Save this as `~/.config/pivt/splash.txt` and set `splash_banner = "file"`,
+`splash_file = "~/.config/pivt/splash.txt"`:
+
+```text
+    ____  _       ___   __
+   / __ \| |     / / | / /
+  / /_/ /| | /| / /  |/ /
+ / ____/ | |/ |/ / /|  /
+/_/      |__/|__/_/ |_/
+```
+
+**Screenshots and timing.** `pivt snap bg:<stars|flow|matrix|snow|plasma|off>`
+renders the main view over a background, `pivt snap burst:<ring|sparkle|confetti>`
+a flag burst, `pivt snap splash:<N>` the splash N × 50 ms in. `--set key=value`
+(repeatable) applies options for that one render without saving them, e.g.
+`pivt snap splash:40 --set splash_banner=text --set splash_text=htb --set splash_bg=matrix`.
+`pivt snap bench[:<background>] --size 200x60` prints the average time per
+frame for each background with the whole UI on top (a few ms at 200x60 in a
+release build: no per-cell allocation, palettes resolved once per frame).
 
 ## Settings (`,`)
 
 `,` opens one screen with every setting, so you never have to hand-edit
-`config.toml`: sections down the left (General · Look & motion · Layout ·
+`config.toml`: sections down the left (General · Look · Background ·
+Animations · Layout ·
 Theme · Discord & privacy · Scope & safety · Paths & integration ·
 Keybindings), the options of the selected one on the right with their
 current value, whether you set it (`● set`) or it's the default, and a short
