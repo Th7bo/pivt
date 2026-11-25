@@ -131,7 +131,8 @@ pub fn load(dir: &Path) -> Result<Option<Session>, String> {
 /// stale scrollback files removed, then session.toml (each atomically).
 pub fn save(dir: &Path, s: &Session) -> std::io::Result<()> {
     let sdir = dir.join(SCROLL_DIR);
-    std::fs::create_dir_all(&sdir)?;
+    crate::model::create_private_dir(dir)?;
+    crate::model::create_private_dir(&sdir)?;
     for t in &s.tabs {
         if let (Some(out), true) = (&t.output, safe_name(&t.file)) {
             write_atomic(&sdir.join(&t.file), out.as_bytes())?;
@@ -218,7 +219,7 @@ fn read_capped(path: &Path) -> String {
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
+    crate::model::write_private(&tmp, bytes)?;
     std::fs::rename(&tmp, path)
 }
 

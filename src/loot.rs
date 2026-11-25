@@ -1,7 +1,7 @@
-use crate::model::config_dir;
+use crate::model::{config_dir, create_private_dir, restrict, write_private};
 use crate::room::Room;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A captured credential / secret found during a box.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -71,7 +71,8 @@ pub fn loot_path(active_room: Option<&Room>, target: &str) -> PathBuf {
     base.join(format!("{name}.toml"))
 }
 
-pub fn load(path: &PathBuf) -> Vec<Cred> {
+pub fn load(path: &Path) -> Vec<Cred> {
+    let _ = restrict(path, 0o600);
     std::fs::read_to_string(path)
         .ok()
         .and_then(|t| toml::from_str::<LootFile>(&t).ok())
@@ -79,13 +80,18 @@ pub fn load(path: &PathBuf) -> Vec<Cred> {
         .unwrap_or_default()
 }
 
-pub fn save(path: &PathBuf, creds: &[Cred]) {
+pub fn save(path: &Path, creds: &[Cred]) {
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        // a room dir is the user's; only the config/loot dir is ours to lock down
+        if dir.exists() {
+            let _ = std::fs::create_dir_all(dir);
+        } else {
+            let _ = create_private_dir(dir);
+        }
     }
     let f = LootFile { creds: creds.to_vec() };
     if let Ok(txt) = toml::to_string_pretty(&f) {
-        let _ = std::fs::write(path, txt);
+        let _ = write_private(path, txt);
     }
 }
 

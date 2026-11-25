@@ -1961,7 +1961,7 @@ impl App {
             Some(r) => r.path.join("loot").join("hashes"),
             None => crate::model::config_dir().join("loot").join("hashes"),
         };
-        if let Err(e) = std::fs::create_dir_all(&dir) {
+        if let Err(e) = create_private_dir(&dir) {
             self.set_status(format!("✗ can't create {}: {e}", dir.display()));
             return;
         }
@@ -1986,7 +1986,8 @@ impl App {
             CrackTool::John(_) if !kind.name.starts_with("NetNTLM") => format!("pivt:{body}"),
             _ => body,
         };
-        if let Err(e) = std::fs::write(&hash_file, format!("{body}\n")) {
+        // the cracker's `> out` keeps this 0600 file's mode
+        if let Err(e) = write_private(&hash_file, format!("{body}\n")).and_then(|_| write_private(&out_file, "")) {
             self.set_status(format!("✗ can't write hash file: {e}"));
             return;
         }

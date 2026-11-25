@@ -98,6 +98,8 @@ pub fn token_path() -> std::path::PathBuf {
 }
 
 fn load_token() -> Option<String> {
+    // a bearer token for the user's account: owner-only
+    let _ = crate::model::restrict(&token_path(), 0o600);
     std::env::var("HTB_TOKEN")
         .ok()
         .or_else(|| std::fs::read_to_string(token_path()).ok())

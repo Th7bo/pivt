@@ -1,8 +1,7 @@
-use crate::model::config_dir;
+use crate::model::{config_dir, create_private_dir, private_options, write_private};
 use crate::room::{now, Room};
-use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Where the running log goes: the active room's dir if set, else
 /// ~/.config/pivt/writeups/<target|date>.md.
@@ -11,7 +10,7 @@ pub fn log_path(active_room: Option<&Room>, target: &str) -> PathBuf {
         return r.log_file();
     }
     let base = config_dir().join("writeups");
-    let _ = std::fs::create_dir_all(&base);
+    let _ = create_private_dir(&base);
     let name = if target.is_empty() {
         now("%Y-%m-%d")
     } else {
@@ -26,7 +25,7 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
-fn ensure_header(path: &PathBuf, target: &str) {
+fn ensure_header(path: &Path, target: &str) {
     if path.exists() {
         return;
     }
@@ -38,11 +37,12 @@ fn ensure_header(path: &PathBuf, target: &str) {
         "# pivt log — {tgt}\n\n_started {}_\n\nCommands run and notes, newest at the bottom.\n",
         now("%Y-%m-%d %H:%M")
     );
-    let _ = std::fs::write(path, header);
+    // the log records filled commands, passwords included
+    let _ = write_private(path, header);
 }
 
-fn append(path: &PathBuf, text: &str) {
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+fn append(path: &Path, text: &str) {
+    if let Ok(mut f) = private_options().append(true).open(path) {
         let _ = f.write_all(text.as_bytes());
     }
 }
@@ -120,7 +120,7 @@ pub fn export(
         Some(r) => r.path.join("writeup.md"),
         None => {
             let base = config_dir().join("writeups");
-            std::fs::create_dir_all(&base)?;
+            create_private_dir(&base)?;
             let name = if target.is_empty() { now("%Y-%m-%d") } else { sanitize(target) };
             base.join(format!("{name}-writeup.md"))
         }
@@ -172,7 +172,8 @@ pub fn export(
         s.push('\n');
     }
 
-    std::fs::write(&out_path, s)?;
+    // carries the credentials table
+    write_private(&out_path, s)?;
     Ok(out_path)
 }
 

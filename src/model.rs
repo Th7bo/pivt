@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A single cheatsheet command/template.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +125,50 @@ pub struct Config {
     pub vars: BTreeMap<String, String>,
 }
 
+/// Write a file only its owner can read (0600), tightening an existing one.
+/// For anything holding credentials or command output.
+pub fn write_private(path: &Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = private_options().write(true).truncate(true).open(path)?;
+    restrict(path, 0o600)?;
+    f.write_all(contents.as_ref())
+}
+
+/// `OpenOptions` that create files as 0600 (append/write left to the caller).
+pub fn private_options() -> std::fs::OpenOptions {
+    let mut o = std::fs::OpenOptions::new();
+    o.create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    o
+}
+
+/// `create_dir_all`, then make the leaf directory owner-only (0700).
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    restrict(dir, 0o700)
+}
+
+/// chmod `path` to `mode` if it is looser (no-op when missing or non-unix).
+pub fn restrict(path: &Path, mode: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match std::fs::metadata(path) {
+            Ok(m) if m.permissions().mode() & 0o777 & !mode != 0 => {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?
+            }
+            _ => {}
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
+    Ok(())
+}
+
 pub fn config_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -228,6 +272,8 @@ pub fn save_user_commands(all: &[Command]) -> std::io::Result<()> {
 }
 
 pub fn load_config() -> Config {
+    // holds USER/PASS/HASH: tighten a file left world-readable by older pivt
+    let _ = restrict(&config_file(), 0o600);
     if let Ok(txt) = std::fs::read_to_string(config_file()) {
         toml::from_str(&txt).unwrap_or_default()
     } else {
@@ -236,9 +282,9 @@ pub fn load_config() -> Config {
 }
 
 pub fn save_config(cfg: &Config) -> std::io::Result<()> {
-    std::fs::create_dir_all(config_dir())?;
+    create_private_dir(&config_dir())?;
     let txt = toml::to_string_pretty(cfg).unwrap_or_default();
-    std::fs::write(config_file(), txt)
+    write_private(&config_file(), txt)
 }
 
 /// Extract `<PLACEHOLDER>` tokens (UPPERCASE / digits / underscore) from a template,
@@ -644,6 +690,40 @@ raw_pty = true
         }
         let recipes = include_str!("default_recipes.toml");
         assert!(!recipes.contains("crackmapexec"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_files_and_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let d = std::env::temp_dir().join(format!("pivt-perm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        // an existing loose dir + file get tightened
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let f = d.join("config.toml");
+        std::fs::write(&f, "old").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        create_private_dir(&d).unwrap();
+        write_private(&f, "PASS = 'x'").unwrap();
+        assert_eq!(mode(&d), 0o700);
+        assert_eq!(mode(&f), 0o600);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "PASS = 'x'");
+        // new files are created 0600, a stricter mode is left alone
+        let n = d.join("sub").join("new.toml");
+        create_private_dir(n.parent().unwrap()).unwrap();
+        write_private(&n, "").unwrap();
+        assert_eq!(mode(&n), 0o600);
+        std::fs::set_permissions(&n, std::fs::Permissions::from_mode(0o400)).unwrap();
+        restrict(&n, 0o600).unwrap();
+        assert_eq!(mode(&n), 0o400);
+        // loot saves the same way
+        let loot = d.join("loot").join("10.0.0.1.toml");
+        crate::loot::save(&loot, &[crate::loot::Cred { user: "a".into(), pass: "b".into(), ..Default::default() }]);
+        assert_eq!(mode(&loot), 0o600);
+        assert_eq!(mode(loot.parent().unwrap()), 0o700);
+        std::fs::remove_dir_all(&d).ok();
     }
 
     #[test]
