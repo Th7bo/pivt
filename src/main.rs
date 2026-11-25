@@ -36,12 +36,12 @@ use crossterm::{
 };
 use ratatui::prelude::*;
 use std::io::{self, Stdout};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && args[1] == "snap" {
-        snapshot(&args[2], theme_arg(&args).as_deref(), snap_size(&args));
+        snapshot(&args[2], theme_arg(&args).as_deref(), snap_size(&args), &set_args(&args));
         return Ok(());
     }
     if args.len() >= 2 && args[1] == "keys" {
@@ -100,16 +100,24 @@ fn print_prefs() {
     let mut last = None;
     for o in prefs::OPTIONS {
         if last != Some(o.section) {
-            println!("{}[{}]", if last.is_some() { "\n" } else { "" }, o.section.name());
+            if last.is_none_or(|l: prefs::Section| !l.same_table(o.section)) {
+                println!("{}[{}]", if last.is_some() { "\n" } else { "" }, o.section.name());
+            }
+            match o.section {
+                prefs::Section::Bg => println!("# background"),
+                prefs::Section::Motion => println!("# animations"),
+                _ => {}
+            }
             last = Some(o.section);
         }
         let range = match &o.kind {
             prefs::Kind::Bool => "true/false".to_string(),
-            prefs::Kind::Int { min, max, unit } => format!("{min}..{max}{}", if unit.is_empty() { String::new() } else { format!(" {unit}") }),
+            prefs::Kind::Int { min, max, unit, .. } => format!("{min}..{max}{}", if unit.is_empty() { String::new() } else { format!(" {unit}") }),
             prefs::Kind::Choice(c) => c.join("/"),
             prefs::Kind::Glyphs { presets, .. } => {
                 format!("{} or chars", presets.iter().map(|p| p.0).collect::<Vec<_>>().join("/"))
             }
+            prefs::Kind::Text { max } => format!("text (≤{max} chars)"),
         };
         let cur = p.get(o.key).map(|v| v.to_string()).unwrap_or_default();
         let def = o.default_val().to_string();
@@ -137,6 +145,46 @@ fn snap_size(args: &[String]) -> (u16, u16) {
     std::env::var("PIVT_SNAP_SIZE").ok().and_then(|v| parse(&v)).unwrap_or((110, 32))
 }
 
+/// `--set key=value` (repeatable): `[layout]` / `[look]` options for one
+/// `pivt snap` (never saved), e.g. `--set background=matrix`.
+fn set_args(args: &[String]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let v = if a == "--set" { it.next().map(String::as_str) } else { a.strip_prefix("--set=") };
+        if let Some((k, v)) = v.and_then(|v| v.split_once('=')) {
+            out.push((k.trim().to_string(), v.trim().to_string()));
+        }
+    }
+    out
+}
+
+/// `pivt snap bench[:<background>]`: average render time per frame for each
+/// background (or one) at the snap size, animations on, release build
+/// recommended.
+fn bench(app: &mut App, only: Option<&str>, (width, height): (u16, u16)) {
+    use ratatui::backend::TestBackend;
+    let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+    app.mode = Mode::Normal;
+    app.mouse = Some((width / 2, height / 2));
+    const FRAMES: u32 = 120;
+    println!("{width}x{height}, {FRAMES} frames each (whole UI drawn on top)");
+    for name in prefs::Background::NAMES {
+        if only.is_some_and(|o| o != *name) {
+            continue;
+        }
+        let Some(bg) = prefs::Background::parse(name) else { continue };
+        app.prefs.background = bg;
+        let t0 = Instant::now();
+        for i in 0..FRAMES {
+            app.ms = 10_000 + i as u64 * 50;
+            term.draw(|f| ui::draw(f, app)).unwrap();
+        }
+        let per = t0.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64;
+        println!("{name:<8} {per:>7.3} ms/frame  ({:.0} fps max)", 1000.0 / per.max(1e-6));
+    }
+}
+
 /// `--theme <name>` / `--theme=<name>`, else `$PIVT_THEME`: a theme for this
 /// run only (not saved).
 fn theme_arg(args: &[String]) -> Option<String> {
@@ -155,18 +203,41 @@ fn theme_arg(args: &[String]) -> Option<String> {
 /// Headless render for development/screenshots: `pivt snap splash:8` or `pivt snap normal`.
 /// Never loads or saves the persistent session, so screenshots stay clean.
 /// `theme`: `--theme <name>` or `$PIVT_THEME`, e.g. `pivt snap normal --theme nord`.
-fn snapshot(what: &str, theme: Option<&str>, (width, height): (u16, u16)) {
+fn snapshot(what: &str, theme: Option<&str>, (width, height): (u16, u16), sets: &[(String, String)]) {
     use ratatui::backend::TestBackend;
     // no Discord / ping threads: a snapshot must exit right away
     let mut app = App::headless();
     if let Some(t) = theme {
         app.theme_override(t);
     }
-    app.tick = 60;
+    for (k, v) in sets {
+        if let Err(e) = app.pref_override(k, v) {
+            eprintln!("--set {k}={v}: {e}");
+        }
+    }
+    if let Some(w) = &app.splash_warning {
+        eprintln!("warning: {w}");
+    }
+    // the clock: ms; `splash:<N>` counts 50 ms frames
+    app.ms = 3_000;
     match what {
+        s if s.starts_with("bench") => {
+            bench(&mut app, s.strip_prefix("bench:"), (width, height));
+            return;
+        }
         s if s.starts_with("splash:") => {
-            app.tick = s.strip_prefix("splash:").and_then(|n| n.parse().ok()).unwrap_or(0);
+            app.ms = s.strip_prefix("splash:").and_then(|n| n.parse::<u64>().ok()).unwrap_or(0) * 50;
             app.splash_start = 0;
+        }
+        // bg:<stars|flow|matrix|snow|plasma|off>: the main view over that background
+        s if s.starts_with("bg:") => {
+            app.mode = Mode::Normal;
+            match prefs::Background::parse(&s[3..]) {
+                Some(b) => app.prefs.background = b,
+                None => eprintln!("unknown background '{}' (one of {})", &s[3..], prefs::Background::NAMES.join("/")),
+            }
+            app.ms = 6_000;
+            app.mouse = Some((width * 2 / 3, height / 2));
         }
         "pvar" => {
             app.mode = Mode::Normal;
@@ -228,12 +299,12 @@ fn snapshot(what: &str, theme: Option<&str>, (width, height): (u16, u16)) {
         "flow" => {
             app.mode = Mode::Normal;
             app.prefs.background = prefs::Background::Flow;
-            app.tick = 120;
+            app.ms = 6_000;
             app.mouse = Some((70, 18));
         }
         "flowsplash" => {
             app.prefs.background = prefs::Background::Flow;
-            app.tick = 22;
+            app.ms = 1_100;
             app.splash_start = 0;
         }
         "parse" => {
@@ -259,11 +330,19 @@ fn snapshot(what: &str, theme: Option<&str>, (width, height): (u16, u16)) {
             app.open_gtfo();
             app.gtfo_query = "find".into();
         }
-        "burst" => {
+        // burst · burst:<ring|sparkle|confetti>, ~40% through
+        s if s == "burst" || s.starts_with("burst:") => {
             app.mode = Mode::Normal;
-            app.tick = 100;
-            app.burst_start = Some(88); // ~40% progress
-            app.burst_label = "ROOT PWNED".into();
+            if let Some(style) = s.strip_prefix("burst:") {
+                if let Err(e) = app.pref_override("burst_style", &format!("\"{style}\"")) {
+                    eprintln!("{e}");
+                }
+            }
+            app.ms = 10_000;
+            app.flags_captured = 1;
+            app.vars.insert("RHOST".into(), "10.10.11.42".into());
+            app.fire_burst("root");
+            app.burst_start = Some(app.ms - app.fx.burst_ms * 2 / 5);
         }
         "flag" => {
             app.mode = Mode::Normal;
@@ -559,7 +638,6 @@ fn log_thread_panic(msg: &str) {
 }
 
 fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::Result<()> {
-    let tick_rate = Duration::from_millis(50); // ~20 fps
     let mut last_tick = Instant::now();
     let mut mouse_on = false;
     let mut dirty = true;
@@ -587,6 +665,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::
         if app.should_quit {
             return Ok(());
         }
+        // the `fps` cap (can change live from the settings screen)
+        let tick_rate = app.frame_interval();
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)? {
             dirty = true;
@@ -614,7 +694,10 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::
             dirty = true;
         }
         if last_tick.elapsed() >= tick_rate {
-            app.on_tick();
+            // real elapsed time, so timers and chores keep wall-clock pace
+            // (capped: a suspended terminal shouldn't fast-forward animations)
+            let dt = last_tick.elapsed().as_millis().min(1_000) as u64;
+            app.advance(dt);
             last_tick = Instant::now();
             if !app.prefs.animations {
                 let sig = app.idle_signature();
@@ -1581,7 +1664,7 @@ mod tests {
                     }
                 }
                 app.mode = Mode::Normal;
-                app.burst_start = Some(app.tick);
+                app.burst_start = Some(app.ms);
                 buffer(&app, 80, 24);
                 app.burst_start = None;
             }
@@ -1626,8 +1709,8 @@ mod tests {
 
     #[test]
     fn animations_off_frames_are_stable() {
-        for bg in ["stars", "flow", "off"] {
-            let look = format!("animations = false\nbackground = \"{bg}\"");
+        for bg in prefs::Background::NAMES {
+            let look = format!("animations = false\nbackground = \"{bg}\"\nstar_parallax = true\nsplash_reveal = \"fade\"");
             let mut app = prefd("", &look);
             app.vars.insert("RHOST".into(), String::new());
             app.on_tick();
@@ -1636,19 +1719,24 @@ mod tests {
                 let sig = app.idle_signature();
                 app.on_tick();
                 let b = buffer(&app, w, h);
-                assert_eq!(a, b, "{bg}: frame changed between ticks");
+                // (glyphs: other tests switch the global theme in parallel)
+                assert_eq!(text(&a), text(&b), "{bg}: frame changed between ticks");
                 // nothing changed → the event loop would skip the redraw
                 assert_eq!(sig, app.idle_signature(), "{bg}");
+                // and much later it's still the same picture
+                app.ms += 7_000;
+                assert_eq!(text(&a), text(&buffer(&app, w, h)), "{bg}: frame changed over time");
             }
             // the splash is static too
             app.mode = Mode::Splash;
             let a = buffer(&app, 110, 32);
             app.on_tick();
-            assert_eq!(a, buffer(&app, 110, 32), "{bg} splash");
+            app.ms += 5_000;
+            assert_eq!(text(&a), text(&buffer(&app, 110, 32)), "{bg} splash");
         }
         // sanity: with animations on the starfield does move
         let mut app = prefd("", "");
-        app.tick = 100;
+        app.ms = 5_000;
         let a = buffer(&app, 110, 32);
         for _ in 0..8 {
             app.on_tick();
@@ -1674,13 +1762,26 @@ mod tests {
         let mut app = prefd("", "splash_hold = false\nsplash_seconds = 2");
         app.mode = Mode::Splash;
         app.splash_start = 0;
-        app.tick = 0;
+        app.ms = 0;
         for _ in 0..39 {
             app.on_tick();
         }
         assert!(app.mode == Mode::Splash);
         app.on_tick();
-        assert!(app.mode == Mode::Normal, "2 s = 40 ticks");
+        assert!(app.mode == Mode::Normal, "2 s = 40 frames at 20 fps");
+        // the same 2 s at 60 fps is 120 frames: the timer is wall-clock
+        let mut app = prefd("", "splash_hold = false\nsplash_seconds = 2\nfps = 60");
+        app.mode = Mode::Splash;
+        app.splash_start = 0;
+        app.ms = 0;
+        let mut frames = 0;
+        while app.mode == Mode::Splash && frames < 1_000 {
+            app.on_tick();
+            frames += 1;
+        }
+        // 16 ms frames (60 fps, rounded down): 2 s ≈ 125 of them
+        assert!((120..=126).contains(&frames), "{frames} frames");
+        assert!((2_000..2_020).contains(&app.ms), "{} ms", app.ms);
         // hold (default) never times out
         let mut app = prefd("", "");
         app.mode = Mode::Splash;
@@ -1688,5 +1789,163 @@ mod tests {
             app.on_tick();
         }
         assert!(app.mode == Mode::Splash);
+    }
+
+    #[test]
+    fn fps_sets_the_frame_interval_but_not_the_pace_of_chores() {
+        let mut counts = Vec::new();
+        for fps in [5u16, 20, 60] {
+            let mut app = prefd("", &format!("fps = {fps}"));
+            assert_eq!(app.frame_interval(), std::time::Duration::from_millis(1000 / fps as u64));
+            app.ms = 0;
+            app.chores = Default::default();
+            // 20 s of frames at this rate
+            let frames = 20 * 1000 / app.prefs.frame_ms();
+            for _ in 0..frames {
+                app.on_tick();
+            }
+            assert!((19_900..=20_000).contains(&app.ms), "{fps} fps: {} ms", app.ms);
+            counts.push(app.chores);
+        }
+        // scope 1/s, session 1/2 s, LHOST 1/10 s, presence 1/5 s (+ the first push)
+        for c in &counts {
+            assert!((19..=20).contains(&c.scope), "{c:?}");
+            assert!((9..=10).contains(&c.session), "{c:?}");
+            assert_eq!(c.lhost, 2, "{c:?}");
+            assert!((4..=5).contains(&c.rpc), "{c:?}");
+        }
+        // the clamp: out-of-range fps in config is clamped, not refused
+        let (p, w) = prefs::Prefs::load(&toml::Table::new(), &toml::from_str("fps = 500").unwrap(), false);
+        assert_eq!(p.fps, 60);
+        assert!(w[0].contains("clamped"));
+        // the event loop advances by real elapsed time, whatever the frame rate
+        let mut app = prefd("", "fps = 5");
+        app.ms = 0;
+        app.advance(1_000);
+        assert_eq!(app.ms, 1_000);
+        // the pinger and job readers run on their own threads with fixed
+        // Durations; nothing there counts frames
+        assert_eq!(crate::ping::INTERVAL, std::time::Duration::from_secs(3));
+    }
+
+    #[test]
+    fn every_background_burst_reveal_and_splash_source_renders() {
+        let dir = std::env::temp_dir().join(format!("pivt-splash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let art = dir.join("art.txt");
+        std::fs::write(&art, "  /\\_/\\\n ( o.o )\n  > ^ <\n").unwrap();
+        let sources = [
+            String::new(),
+            format!("splash_banner = \"file\"\nsplash_file = \"{}\"", art.display()),
+            "splash_banner = \"file\"\nsplash_file = \"/nonexistent/pivt-art\"".into(),
+            "splash_banner = \"text\"\nsplash_text = \"root me\"".into(),
+            "splash_banner = \"text\"\nsplash_text = \"0xdeadbeef\"\nsplash_font = \"plain\"\nsplash_subtitle = \"\"".into(),
+        ];
+        let mut app = App::for_tests();
+        for bg in prefs::Background::NAMES {
+            for (i, src) in sources.iter().enumerate() {
+                let reveal = prefs::Reveal::NAMES[i % prefs::Reveal::NAMES.len()];
+                let look = format!("background = \"{bg}\"\nsplash_reveal = \"{reveal}\"\n{src}");
+                set_prefs(&mut app, "", &look);
+                for &(w, h) in &[(80, 24), (200, 60)] {
+                    app.mode = Mode::Normal;
+                    app.ms = 7_000;
+                    app.mouse = Some((w / 3, h / 2));
+                    buffer(&app, w, h);
+                    app.mode = Mode::Splash;
+                    app.splash_start = 6_000;
+                    for ms in [6_000, 6_200, 6_500, 9_000] {
+                        app.ms = ms;
+                        let t = text(&buffer(&app, w, h));
+                        if ms == 9_000 && i == 0 {
+                            assert!(t.contains("██████╗"), "{bg}: {t}");
+                        }
+                    }
+                }
+            }
+            for sbg in prefs::SplashBg::NAMES {
+                set_prefs(&mut app, "", &format!("background = \"{bg}\"\nsplash_bg = \"{sbg}\""));
+                app.mode = Mode::Splash;
+                buffer(&app, 80, 24);
+            }
+        }
+        // custom banners show up
+        set_prefs(&mut app, "", &format!("splash_banner = \"file\"\nsplash_file = \"{}\"\nsplash_reveal = \"instant\"", art.display()));
+        app.mode = Mode::Splash;
+        assert!(text(&buffer(&app, 80, 24)).contains("( o.o )"));
+        set_prefs(&mut app, "", "splash_banner = \"text\"\nsplash_text = \"pwn\"\nsplash_font = \"plain\"\nsplash_subtitle = \"have fun\"");
+        app.mode = Mode::Splash;
+        app.ms = app.splash_start + 60_000;
+        let t = text(&buffer(&app, 80, 24));
+        assert!(t.contains("P W N") && t.contains("h a v e   f u n"), "{t}");
+        // a missing file falls back to the built-in banner, with a warning
+        set_prefs(&mut app, "", "splash_banner = \"file\"\nsplash_file = \"/nonexistent/pivt-art\"");
+        assert!(app.splash_warning.as_deref().unwrap_or("").contains("built-in"));
+        app.mode = Mode::Splash;
+        assert!(text(&buffer(&app, 80, 24)).contains("██████╗"));
+
+        // every burst style, flashing or not, over every size
+        for style in prefs::BurstStyle::NAMES {
+            for flash in [true, false] {
+                set_prefs(&mut app, "", &format!("burst_style = \"{style}\"\nburst_flash = {flash}\nburst_ms = 2000"));
+                app.mode = Mode::Normal;
+                app.ms = 50_000;
+                app.fire_burst("user");
+                for step in [0, 400, 1_000, 1_900] {
+                    app.ms = 50_000 + step;
+                    for &(w, h) in &[(80, 24), (200, 60), (12, 5)] {
+                        buffer(&app, w, h);
+                    }
+                }
+                assert!(app.burst_progress().is_some());
+                app.ms = 52_000;
+                assert!(app.burst_progress().is_none(), "burst_ms = 2000");
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn burst_banner_template_and_switch() {
+        let mut app = prefd("", "burst_text = \"{which} on {BOX} ({ROOM}) #{N}\"");
+        app.vars.insert("RHOST".into(), "10.10.11.7".into());
+        app.flags_captured = 2;
+        app.fire_burst("root");
+        assert_eq!(app.burst_label, "root on 10.10.11.7 () #2");
+        assert!(text(&buffer(&app, 80, 24)).contains("root on 10.10.11.7"));
+        // the default
+        let mut app = prefd("", "");
+        app.fire_burst("user");
+        assert_eq!(app.burst_label, "USER PWNED");
+        // your own text, no placeholders
+        let mut app = prefd("", "burst_text = \"gg\"");
+        app.fire_burst("user");
+        assert_eq!(app.burst_label, "gg");
+        // burst = false: nothing at all
+        let mut app = prefd("", "burst = false");
+        app.fire_burst("user");
+        assert!(app.burst_progress().is_none());
+        assert_eq!(prefs::banner_text("  ", "user", "", "", 0), "USER PWNED", "empty → default");
+    }
+
+    #[test]
+    fn pulse_and_shooting_star_switches() {
+        let t = crate::theme::theme();
+        let mut app = prefd("", "pulse = false\npulse_from = \"ok\"");
+        app.ms = 300;
+        assert_eq!(app.pulse(), t.ok, "steady from-colour");
+        let mut app = prefd("", "pulse_from = \"ok\"\npulse_to = \"warn\"\npulse_speed = 10");
+        app.ms = 150; // peak of a 300 ms cycle
+        assert_eq!(app.pulse(), crate::anim::blend(t.ok, t.warn, 1.0));
+        // shoot = false: the starfield frame doesn't depend on streaks
+        let mut on = prefd("", "shoot_every = 2\nstar_twinklers = 0\nstar_drift = \"none\"\npulse = false");
+        let mut off = prefd("", "shoot_every = 2\nstar_twinklers = 0\nstar_drift = \"none\"\npulse = false\nshoot = false");
+        on.ms = 2_150;
+        off.ms = 2_150;
+        let a = buffer(&on, 110, 32);
+        let b = buffer(&off, 110, 32);
+        off.ms = 3_900;
+        assert_eq!(b, buffer(&off, 110, 32), "no streak, still field");
+        assert_ne!(a, b, "a streak shows when on");
     }
 }

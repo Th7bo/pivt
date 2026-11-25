@@ -34,19 +34,29 @@ use ratatui::style::Color;
 use ratatui::text::Span;
 use ratatui::widgets::BorderType;
 
-/// The config table an option lives in.
+/// Where an option belongs: its config table (`[layout]` or `[look]`) and
+/// its group in the settings screen. `Bg` (background effects) and `Motion`
+/// (animation, effects, splash) both live in `[look]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
     Layout,
     Look,
+    Bg,
+    Motion,
 }
 
 impl Section {
+    /// The config table name.
     pub fn name(self) -> &'static str {
         match self {
             Section::Layout => "layout",
-            Section::Look => "look",
+            Section::Look | Section::Bg | Section::Motion => "look",
         }
+    }
+
+    /// Same config table?
+    pub fn same_table(self, other: Section) -> bool {
+        self.name() == other.name()
     }
 }
 
@@ -82,13 +92,17 @@ impl std::fmt::Display for Val {
 #[derive(Debug)]
 pub enum Kind {
     Bool,
-    /// Whole number, clamped into `min..=max`. `unit` is for display.
-    Int { min: i64, max: i64, unit: &'static str },
+    /// Whole number, clamped into `min..=max`. `unit` is for display,
+    /// `step` is how far ←/→ move it in the settings screen.
+    Int { min: i64, max: i64, unit: &'static str, step: i64 },
     /// One of a fixed list of names.
     Choice(&'static [&'static str]),
     /// A glyph set: a preset name, or a literal string of `min..=max`
     /// single-width characters (`space` allows a blank).
     Glyphs { presets: &'static [(&'static str, &'static str)], min: usize, max: usize, space: bool },
+    /// Free text of at most `max` characters (no control characters);
+    /// empty is allowed.
+    Text { max: usize },
 }
 
 /// One entry in the option registry.
@@ -123,6 +137,17 @@ impl PrefValue for u16 {
     fn from_val(v: Val) -> Option<Self> {
         match v {
             Val::Int(i) => u16::try_from(i).ok(),
+            _ => None,
+        }
+    }
+}
+impl PrefValue for i16 {
+    fn to_val(&self) -> Val {
+        Val::Int(*self as i64)
+    }
+    fn from_val(v: Val) -> Option<Self> {
+        match v {
+            Val::Int(i) => i16::try_from(i).ok(),
             _ => None,
         }
     }
@@ -164,7 +189,52 @@ macro_rules! choice {
 
 choice!(
     /// What's painted behind the UI.
-    Background { Stars => "stars", Flow => "flow", Off => "off" }
+    Background { Stars => "stars", Flow => "flow", Matrix => "matrix", Snow => "snow", Plasma => "plasma", Off => "off" }
+);
+choice!(
+    /// The splash background: `same` follows `background`.
+    SplashBg { Same => "same", Stars => "stars", Flow => "flow", Matrix => "matrix", Snow => "snow", Plasma => "plasma", Off => "off" }
+);
+choice!(
+    /// Which way the starfield drifts.
+    Drift { Up => "up", Down => "down", Left => "left", Right => "right", None => "none" }
+);
+choice!(
+    /// Where the starfield takes its colour from.
+    StarColor { Theme => "theme", Accent => "accent", Category => "category" }
+);
+choice!(
+    /// Shooting-star heading.
+    ShootDir {
+        Right => "right", Left => "left", DownRight => "down-right", DownLeft => "down-left",
+        UpRight => "up-right", UpLeft => "up-left", Down => "down", Random => "random",
+    }
+);
+choice!(
+    /// Flow field colour: the theme's star ramp, tinted toward the selected
+    /// category, or cycling through the theme's category hues.
+    FlowColor { Theme => "theme", Category => "category", Rainbow => "rainbow" }
+);
+choice!(
+    /// Matrix rain glyphs.
+    MatrixCharset { Katakana => "katakana", Ascii => "ascii", Binary => "binary", Hex => "hex" }
+);
+choice!(
+    /// Flag-capture burst animation.
+    BurstStyle { Ring => "ring", Sparkle => "sparkle", Confetti => "confetti" }
+);
+choice!(
+    /// Splash banner source: the built-in PIVT art, an ASCII art file or
+    /// your own text.
+    SplashBanner { Pivt => "pivt", File => "file", Text => "text" }
+);
+choice!(
+    /// How `splash_text` is drawn.
+    SplashFont { Block => "block", Plain => "plain" }
+);
+choice!(
+    /// How the splash banner appears.
+    Reveal { Typewriter => "typewriter", Fade => "fade", Scanline => "scanline", Instant => "instant" }
 );
 choice!(
     /// Pane / popup border style.
@@ -199,6 +269,22 @@ pub const STAR_PRESETS: &[(&str, &str)] = &[
     ("dots", "·∙•●"),
     ("ascii", ".+*"),
     ("sparkle", "·✧✦"),
+];
+/// Shooting-star trails, head first.
+pub const TRAIL_PRESETS: &[(&str, &str)] = &[
+    ("classic", "✦━─·"),
+    ("dots", "●•·."),
+    ("sparkle", "✦✧*·"),
+    ("ascii", "*=-."),
+    ("comet", "✦✧⋆∙·"),
+];
+/// Theme roles an animation colour can use.
+pub const ROLES: &[&str] =
+    &["accent", "accent2", "accent_hi", "ok", "warn", "gold", "orange", "fg", "star_hi", "star_mid", "border_hi", "htb"];
+/// `shoot_color`: `auto` (the original look) or a theme role.
+pub const SHOOT_COLORS: &[&str] = &[
+    "auto", "accent", "accent2", "accent_hi", "ok", "warn", "gold", "orange", "fg", "star_hi", "star_mid", "border_hi",
+    "htb",
 ];
 /// Selected-row marker presets.
 pub const MARKER_PRESETS: &[(&str, &str)] = &[("bar", "▎"), ("arrow", "▸"), ("dot", "•"), ("chevron", "›")];
@@ -239,7 +325,13 @@ macro_rules! options {
 }
 
 const fn int(min: i64, max: i64, unit: &'static str) -> Kind {
-    Kind::Int { min, max, unit }
+    Kind::Int { min, max, unit, step: 1 }
+}
+const fn int_step(min: i64, max: i64, unit: &'static str, step: i64) -> Kind {
+    Kind::Int { min, max, unit, step }
+}
+const fn text(max: usize) -> Kind {
+    Kind::Text { max }
 }
 
 options! {
@@ -259,28 +351,96 @@ options! {
     Layout.show_hints: bool = true, Kind::Bool, "footer key hints (the status line stays)";
     Layout.compact: bool = false, Kind::Bool, "no pane borders, one-line header (small terminals)";
     // ── [look] ──
-    Look.background: Background = Background::Stars, Kind::Choice(Background::NAMES), "background effect (b cycles)";
-    Look.bg_density: u16 = 5, int(1, 10, ""), "background density";
-    Look.bg_slowdown: u16 = 1, int(1, 10, "×"), "background tick divisor (higher = slower)";
-    Look.flow_charset: String = "classic".into(),
-        Kind::Glyphs { presets: FLOW_PRESETS, min: 2, max: 96, space: true },
-        "flow field ramp: preset or your own chars, faint → dense";
-    Look.star_glyphs: String = "classic".into(),
-        Kind::Glyphs { presets: STAR_PRESETS, min: 1, max: 12, space: false },
-        "starfield glyphs: preset or your own chars, dim → bright";
-    Look.ripple: bool = true, Kind::Bool, "mouse ripple in the flow field";
-    Look.splash: bool = true, Kind::Bool, "startup splash";
-    Look.splash_hold: bool = true, Kind::Bool, "splash waits for a key (off = auto-continue)";
-    Look.splash_seconds: u16 = 3, int(1, 30, "s"), "auto-continue after this long (splash_hold off)";
-    Look.animations: bool = true, Kind::Bool, "pulse, twinkle, shooting stars, burst (off = static, fewer redraws)";
     Look.border: Border = Border::Rounded, Kind::Choice(Border::NAMES), "border style";
     Look.marker: String = "bar".into(),
         Kind::Glyphs { presets: MARKER_PRESETS, min: 1, max: 1, space: false },
         "selected-row marker: preset or one character";
+    Look.splash: bool = true, Kind::Bool, "startup splash";
+    Look.splash_hold: bool = true, Kind::Bool, "splash waits for a key (off = auto-continue)";
+    Look.splash_seconds: u16 = 3, int(1, 30, "s"), "auto-continue after this long (splash_hold off)";
+    // ── [look]: motion, global ──
+    Motion.animations: bool = true, Kind::Bool,
+        "master switch: pulse, twinkle, drift, shooting stars, burst (off = static, fewer redraws)";
+    Motion.fps: u16 = 20, int(5, 60, "fps"), "frame rate cap (animation smoothness vs CPU)";
+    // ── [look]: background ──
+    Bg.background: Background = Background::Stars, Kind::Choice(Background::NAMES), "background effect (b cycles)";
+    Bg.bg_density: u16 = 5, int(1, 10, ""), "starfield / flow density";
+    Bg.bg_slowdown: u16 = 1, int(1, 10, "×"), "background time divisor (higher = slower)";
+    Bg.star_glyphs: String = "classic".into(),
+        Kind::Glyphs { presets: STAR_PRESETS, min: 1, max: 12, space: false },
+        "starfield glyphs: preset or your own chars, dim → bright";
+    Bg.star_twinkle: u16 = 5, int(1, 10, ""), "starfield: twinkle rate";
+    Bg.star_twinklers: u16 = 12, int(0, 100, "%"), "starfield: share of stars that twinkle";
+    Bg.star_drift: Drift = Drift::Up, Kind::Choice(Drift::NAMES), "starfield: drift direction";
+    Bg.star_speed: u16 = 5, int(1, 10, ""), "starfield: drift speed";
+    Bg.star_brightness: u16 = 5, int(1, 10, ""), "starfield: brightness";
+    Bg.star_parallax: bool = false, Kind::Bool, "starfield: three depth layers drifting at different speeds";
+    Bg.star_color: StarColor = StarColor::Theme, Kind::Choice(StarColor::NAMES),
+        "starfield colour: theme ramp, accent, or the selected category's hue";
+    Bg.flow_charset: String = "classic".into(),
+        Kind::Glyphs { presets: FLOW_PRESETS, min: 2, max: 96, space: true },
+        "flow field ramp: preset or your own chars, faint → dense";
+    Bg.flow_scale: u16 = 5, int(1, 10, ""), "flow: zoom (higher = bigger swirls)";
+    Bg.flow_speed: u16 = 5, int(0, 10, ""), "flow: speed (0 = frozen)";
+    Bg.flow_angle: u16 = 203, int_step(0, 359, "°", 15), "flow: drift heading (0 = right, 90 = up)";
+    Bg.flow_octaves: u16 = 3, int(1, 5, ""), "flow: turbulence (noise octaves)";
+    Bg.flow_wave: u16 = 3, int(0, 10, ""), "flow: wave amplitude";
+    Bg.flow_contrast: u16 = 5, int(1, 10, ""), "flow: contrast";
+    Bg.flow_cutoff: u16 = 5, int(0, 10, ""), "flow: cutoff (higher = more blank cells)";
+    Bg.flow_color: FlowColor = FlowColor::Category, Kind::Choice(FlowColor::NAMES),
+        "flow colour: theme ramp, selected category tint, or rainbow through the theme's hues";
+    Bg.ripple: bool = true, Kind::Bool, "mouse ripple in the flow field";
+    Bg.ripple_strength: u16 = 5, int(0, 10, ""), "ripple: strength";
+    Bg.ripple_radius: u16 = 5, int(1, 10, ""), "ripple: radius";
+    Bg.ripple_speed: u16 = 5, int(1, 10, ""), "ripple: wave speed";
+    Bg.matrix_charset: MatrixCharset = MatrixCharset::Katakana, Kind::Choice(MatrixCharset::NAMES),
+        "matrix rain glyphs";
+    Bg.matrix_speed: u16 = 5, int(1, 10, ""), "matrix: fall speed";
+    Bg.matrix_density: u16 = 5, int(1, 10, ""), "matrix: how many columns rain";
+    Bg.snow_density: u16 = 5, int(1, 10, ""), "snow: flake density";
+    Bg.snow_speed: u16 = 5, int(1, 10, ""), "snow: fall speed";
+    Bg.snow_wind: i16 = 1, int(-5, 5, ""), "snow: wind (negative = blows left)";
+    Bg.plasma_charset: String = "classic".into(),
+        Kind::Glyphs { presets: FLOW_PRESETS, min: 2, max: 96, space: true },
+        "plasma ramp: preset or your own chars, faint → dense";
+    Bg.plasma_scale: u16 = 5, int(1, 10, ""), "plasma: zoom (higher = bigger blobs)";
+    Bg.plasma_speed: u16 = 5, int(1, 10, ""), "plasma: speed";
+    Bg.plasma_density: u16 = 5, int(1, 10, ""), "plasma: density (how much of the field shows)";
+    // ── [look]: effects ──
+    Motion.shoot: bool = true, Kind::Bool, "shooting stars over the starfield";
+    Motion.shoot_every: u16 = 13, int(2, 120, "s"), "shooting stars: seconds between streaks (the splash: ÷6)";
+    Motion.shoot_angle: ShootDir = ShootDir::Right, Kind::Choice(ShootDir::NAMES), "shooting stars: heading";
+    Motion.shoot_length: u16 = 4, int(2, 20, "cells"), "shooting stars: trail length";
+    Motion.shoot_speed: u16 = 5, int(1, 10, ""), "shooting stars: speed";
+    Motion.shoot_trail: String = "classic".into(),
+        Kind::Glyphs { presets: TRAIL_PRESETS, min: 1, max: 12, space: false },
+        "shooting stars: trail glyphs, head first";
+    Motion.shoot_color: String = "auto".into(), Kind::Choice(SHOOT_COLORS), "shooting stars: colour (a theme role)";
+    Motion.pulse: bool = true, Kind::Bool, "selected-row marker pulses";
+    Motion.pulse_speed: u16 = 5, int(1, 10, ""), "pulse speed";
+    Motion.pulse_from: String = "accent".into(), Kind::Choice(ROLES), "pulse colour, resting (a theme role)";
+    Motion.pulse_to: String = "accent_hi".into(), Kind::Choice(ROLES), "pulse colour, peak (a theme role)";
+    Motion.burst: bool = true, Kind::Bool, "flag-capture burst + banner";
+    Motion.burst_style: BurstStyle = BurstStyle::Ring, Kind::Choice(BurstStyle::NAMES), "burst animation";
+    Motion.burst_ms: u16 = 1500, int_step(300, 10000, "ms", 100), "burst duration";
+    Motion.burst_text: String = "{WHICH} PWNED".into(), text(40),
+        "burst banner: {WHICH} {which} {BOX} {ROOM} {N} are filled in";
+    Motion.burst_flash: bool = true, Kind::Bool, "burst banner flashes";
+    Motion.splash_banner: SplashBanner = SplashBanner::Pivt, Kind::Choice(SplashBanner::NAMES),
+        "splash banner: built-in PIVT art, splash_file, or splash_text";
+    Motion.splash_file: String = String::new(), text(1024), "splash: ASCII art file (splash_banner = file)";
+    Motion.splash_text: String = String::new(), text(16), "splash: your own banner text (splash_banner = text)";
+    Motion.splash_font: SplashFont = SplashFont::Block, Kind::Choice(SplashFont::NAMES),
+        "splash_text font: built-in block letters or plain";
+    Motion.splash_subtitle: String = "ctf toolkit".into(), text(40), "splash subtitle (empty = none)";
+    Motion.splash_reveal: Reveal = Reveal::Typewriter, Kind::Choice(Reveal::NAMES), "how the splash banner appears";
+    Motion.splash_reveal_speed: u16 = 5, int(1, 10, ""), "splash reveal speed";
+    Motion.splash_bg: SplashBg = SplashBg::Same, Kind::Choice(SplashBg::NAMES),
+        "splash background (same = background)";
 }
 
 /// Display width of one char (0 for control chars).
-fn char_width(c: char) -> usize {
+pub(crate) fn char_width(c: char) -> usize {
     if c.is_control() {
         return 0;
     }
@@ -338,6 +498,16 @@ impl Opt {
             (Kind::Glyphs { presets, .. }, other) => {
                 Err(format!("{key}: expected a preset ({}) or a string, got {other}", preset_names(presets)))
             }
+            (Kind::Text { max }, toml::Value::String(s)) => {
+                if s.chars().count() > *max {
+                    return Err(format!("{key}: longer than {max} characters"));
+                }
+                if s.chars().any(char::is_control) {
+                    return Err(format!("{key}: no control characters (tabs, newlines…)"));
+                }
+                Ok((Val::Str(s.clone()), None))
+            }
+            (Kind::Text { .. }, other) => Err(format!("{key}: expected a string, got {other}")),
         }
     }
 
@@ -352,7 +522,8 @@ impl Opt {
         };
         match (&self.kind, cur) {
             (Kind::Bool, Val::Bool(b)) => Val::Bool(!b),
-            (Kind::Int { min, max, .. }, Val::Int(i)) => Val::Int((i + dir).clamp(*min, *max)),
+            (Kind::Int { min, max, step, .. }, Val::Int(i)) => Val::Int((i + dir * step).clamp(*min, *max)),
+            (Kind::Text { .. }, Val::Str(s)) => Val::Str(s.clone()),
             (Kind::Choice(names), Val::Str(s)) => cycle(names.to_vec(), s),
             (Kind::Glyphs { presets, .. }, Val::Str(s)) => cycle(presets.iter().map(|p| p.0).collect(), s),
             _ => self.default_val(),
@@ -384,7 +555,7 @@ impl Prefs {
                 if section == Section::Look && k == "categories" {
                     continue; // see parse_categories
                 }
-                let Some(opt) = OPTIONS.iter().find(|o| o.section == section && o.key == k) else {
+                let Some(opt) = OPTIONS.iter().find(|o| o.section.same_table(section) && o.key == k) else {
                     let hint = OPTIONS
                         .iter()
                         .find(|o| o.key == k)
@@ -426,6 +597,33 @@ impl Prefs {
         (!g.is_empty()).then_some(g)
     }
 
+    /// Plasma ramp; index 0 is the blank level.
+    pub fn plasma_ramp(&self) -> Vec<char> {
+        let mut g = glyphs(FLOW_PRESETS, &self.plasma_charset);
+        if g.first() != Some(&' ') {
+            g.insert(0, ' ');
+        }
+        if g.len() < 2 {
+            g = FLOW_PRESETS[0].1.chars().collect();
+        }
+        g
+    }
+
+    /// Shooting-star trail, head first (never empty).
+    pub fn trail(&self) -> Vec<char> {
+        let g = glyphs(TRAIL_PRESETS, &self.shoot_trail);
+        if g.is_empty() {
+            TRAIL_PRESETS[0].1.chars().collect()
+        } else {
+            g
+        }
+    }
+
+    /// Milliseconds per frame for the `fps` cap.
+    pub fn frame_ms(&self) -> u64 {
+        1000 / self.fps.clamp(5, 60) as u64
+    }
+
     /// The selected-row marker (always one cell wide).
     pub fn marker(&self) -> String {
         glyphs(MARKER_PRESETS, &self.marker)
@@ -441,7 +639,7 @@ impl Prefs {
         let Some(opt) = Opt::find(key) else { return false };
         let t = match opt.section {
             Section::Layout => layout,
-            Section::Look => look,
+            Section::Look | Section::Bg | Section::Motion => look,
         };
         match v {
             Some(v) => t.insert(key.to_string(), v.to_toml()),
@@ -459,6 +657,24 @@ impl Prefs {
         } else {
             3
         }
+    }
+}
+
+/// Fill in the burst banner template: `{WHICH}` / `{which}` (USER / user,
+/// ROOT / root), `{BOX}` (the target), `{ROOM}` (the active room) and `{N}`
+/// (flags captured). Empty after substitution = the default banner.
+pub fn banner_text(template: &str, which: &str, target: &str, room: &str, flags: usize) -> String {
+    let s = template
+        .replace("{WHICH}", &which.to_uppercase())
+        .replace("{which}", &which.to_lowercase())
+        .replace("{BOX}", target)
+        .replace("{ROOM}", room)
+        .replace("{N}", &flags.to_string());
+    let s = s.trim();
+    if s.is_empty() {
+        format!("{} PWNED", which.to_uppercase())
+    } else {
+        s.to_string()
     }
 }
 
@@ -684,10 +900,75 @@ mod tests {
     }
 
     #[test]
+    fn every_option_parses_clamps_and_round_trips() {
+        for o in OPTIONS {
+            // a non-default value for each kind
+            let v = match &o.kind {
+                Kind::Bool => Val::Bool(!matches!(o.default_val(), Val::Bool(true))),
+                Kind::Int { min, max, .. } => {
+                    // out of range both ways: clamped with a note, never refused
+                    let (lo, n1) = o.parse(&toml::Value::Integer(min - 1000)).unwrap();
+                    let (hi, n2) = o.parse(&toml::Value::Integer(max + 1000)).unwrap();
+                    assert_eq!((lo, hi), (Val::Int(*min), Val::Int(*max)), "{}", o.key);
+                    assert!(n1.is_some() && n2.is_some(), "{}", o.key);
+                    assert!(o.parse(&toml::Value::String("5".into())).is_err(), "{}: wrong type", o.key);
+                    Val::Int(if o.default_val() == Val::Int(*max) { *min } else { *max })
+                }
+                Kind::Choice(names) => {
+                    for n in *names {
+                        assert_eq!(o.parse(&toml::Value::String(n.to_uppercase())).unwrap().0, Val::Str(n.to_string()));
+                    }
+                    assert!(o.parse(&toml::Value::String("no-such-choice".into())).is_err(), "{}", o.key);
+                    o.step(&o.default_val(), 1)
+                }
+                Kind::Glyphs { presets, .. } => Val::Str(presets.last().unwrap().0.to_string()),
+                Kind::Text { max } => {
+                    assert!(o.parse(&toml::Value::String("x".repeat(max + 1))).is_err(), "{}: too long", o.key);
+                    assert!(o.parse(&toml::Value::String("a\nb".into())).is_err(), "{}: control chars", o.key);
+                    assert!(o.parse(&toml::Value::Integer(1)).is_err(), "{}: wrong type", o.key);
+                    Val::Str("custom ✓".into())
+                }
+            };
+            assert_ne!(v, o.default_val(), "{}: pick a non-default value", o.key);
+            // store → serialise → parse → load gives it back, and only that key is written
+            let (mut l, mut k) = (toml::Table::new(), toml::Table::new());
+            assert!(Prefs::store(&mut l, &mut k, o.key, Some(&v)));
+            assert_eq!(l.len() + k.len(), 1, "{}", o.key);
+            let (l, k): (toml::Table, toml::Table) = (
+                toml::from_str(&toml::to_string(&l).unwrap()).unwrap(),
+                toml::from_str(&toml::to_string(&k).unwrap()).unwrap(),
+            );
+            let (p, w) = Prefs::load(&l, &k, false);
+            assert!(w.is_empty(), "{}: {w:?}", o.key);
+            assert_eq!(p.get(o.key), Some(v.clone()), "{}", o.key);
+            let mut back = p.clone();
+            back.set(o.key, o.default_val());
+            assert_eq!(back, Prefs::default(), "{}: no other field moved", o.key);
+        }
+        // animation keys belong in [look], not [layout]
+        let (_, w) = Prefs::load(&tbl("fps = 30\nshoot = false"), &tbl(""), false);
+        assert!(w.iter().any(|x| x.contains("'fps' (it belongs in [look])")), "{w:?}");
+        // stepping honours the step size
+        let o = Opt::find("burst_ms").unwrap();
+        assert_eq!(o.step(&Val::Int(1500), 1), Val::Int(1600));
+        assert_eq!(o.step(&Val::Int(10_000), 1), Val::Int(10_000));
+        assert_eq!(Opt::find("flow_angle").unwrap().step(&Val::Int(350), 1), Val::Int(359));
+        assert_eq!(Opt::find("burst_text").unwrap().step(&Val::Str("hi".into()), 1), Val::Str("hi".into()));
+    }
+
+    #[test]
+    fn banner_template() {
+        assert_eq!(banner_text("{WHICH} PWNED", "root", "", "", 0), "ROOT PWNED");
+        assert_eq!(banner_text("{which}@{BOX} in {ROOM} · {N} flags", "user", "10.0.0.1", "lame", 2), "user@10.0.0.1 in lame · 2 flags");
+        assert_eq!(banner_text("got it!", "user", "", "", 0), "got it!");
+        assert_eq!(banner_text("", "user", "", "", 0), "USER PWNED");
+    }
+
+    #[test]
     fn lenient_parsing_and_clamping() {
         let (p, w) = Prefs::load(
             &tbl("categories_width = 500\ncommands_width = -3\nshow_preview = \"no\"\nbogus = 1\nbackground = \"flow\""),
-            &tbl("background = \"plasma\"\nborder = \"DOUBLE\"\nbg_density = 0\nflow_charset = \"blocks\"\nmarker = \"ab\"\nsplash_seconds = 9\nanimations = false\ncompact = true"),
+            &tbl("background = \"lava\"\nborder = \"DOUBLE\"\nbg_density = 0\nflow_charset = \"blocks\"\nmarker = \"ab\"\nsplash_seconds = 9\nanimations = false\ncompact = true"),
             false,
         );
         assert_eq!(p.categories_width, 40);
@@ -708,7 +989,7 @@ mod tests {
             "show_preview: expected true/false",
             "[layout] unknown key 'bogus'",
             "[layout] unknown key 'background' (it belongs in [look])",
-            "background: unknown 'plasma'",
+            "background: unknown 'lava'",
             "bg_density: 0 clamped to 1",
             "marker: 'ab' needs 1..1",
             "[look] unknown key 'compact' (it belongs in [layout])",

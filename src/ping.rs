@@ -16,7 +16,7 @@ pub struct Ping {
 pub const COMMON_PORTS: &[u16] = &[445, 80, 443, 22, 3389, 5985];
 const MAX_TCP_PROBES: usize = 6;
 const TCP_TIMEOUT: Duration = Duration::from_millis(400);
-const INTERVAL: Duration = Duration::from_secs(3);
+pub(crate) const INTERVAL: Duration = Duration::from_secs(3);
 
 #[derive(Default)]
 struct Target {

@@ -17,6 +17,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub enum Sec {
     General,
     Look,
+    Background,
+    Animations,
     Layout,
     Theme,
     Discord,
@@ -26,13 +28,25 @@ pub enum Sec {
 }
 
 impl Sec {
-    pub const ALL: [Sec; 8] =
-        [Sec::General, Sec::Look, Sec::Layout, Sec::Theme, Sec::Discord, Sec::Scope, Sec::Paths, Sec::Keys];
+    pub const ALL: [Sec; 10] = [
+        Sec::General,
+        Sec::Look,
+        Sec::Background,
+        Sec::Animations,
+        Sec::Layout,
+        Sec::Theme,
+        Sec::Discord,
+        Sec::Scope,
+        Sec::Paths,
+        Sec::Keys,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
             Sec::General => "General",
-            Sec::Look => "Look & motion",
+            Sec::Look => "Look",
+            Sec::Background => "Background",
+            Sec::Animations => "Animations",
             Sec::Layout => "Layout",
             Sec::Theme => "Theme",
             Sec::Discord => "Discord & privacy",
@@ -47,6 +61,8 @@ impl Sec {
         match self {
             Sec::General => "general",
             Sec::Look => "look",
+            Sec::Background => "background",
+            Sec::Animations => "animations",
             Sec::Layout => "layout",
             Sec::Theme => "theme",
             Sec::Discord => "discord",
@@ -162,14 +178,16 @@ pub enum EditKind {
     Key,
 }
 
-/// The section a prefs option is shown in (the splash options are startup
-/// behaviour, so they sit in General).
+/// The section a prefs option is shown in (whether the splash shows at all
+/// is startup behaviour, so those sit in General; its look is in Animations).
 fn pref_sec(o: &Opt) -> Sec {
     match o.key {
         "splash" | "splash_hold" | "splash_seconds" => Sec::General,
         _ => match o.section {
             crate::prefs::Section::Layout => Sec::Layout,
             crate::prefs::Section::Look => Sec::Look,
+            crate::prefs::Section::Bg => Sec::Background,
+            crate::prefs::Section::Motion => Sec::Animations,
         },
     }
 }
@@ -237,7 +255,7 @@ impl Item {
                 Some(Kind::Int { min, max, .. }) => EditKind::Int { min: *min, max: *max },
                 Some(Kind::Choice(c)) => EditKind::Choice(c),
                 Some(Kind::Glyphs { .. }) => EditKind::Glyphs,
-                None => EditKind::Text,
+                Some(Kind::Text { .. }) | None => EditKind::Text,
             },
             Item::Scalar(s) => s.kind(),
             Item::Theme(_) => EditKind::Theme,
@@ -250,7 +268,7 @@ impl Item {
         match self {
             Item::Pref(k) => match Opt::find(k).map(|o| &o.kind) {
                 Some(Kind::Bool) => "on / off".into(),
-                Some(Kind::Int { min, max, unit }) => {
+                Some(Kind::Int { min, max, unit, .. }) => {
                     format!("{min}..{max}{}", if unit.is_empty() { String::new() } else { format!(" {unit}") })
                 }
                 Some(Kind::Choice(c)) => c.join(" / "),
@@ -259,6 +277,8 @@ impl Item {
                     presets.iter().map(|p| p.0).collect::<Vec<_>>().join(" / "),
                     if min == max { min.to_string() } else { format!("{min}..{max}") }
                 ),
+                Some(Kind::Text { .. }) if k == "splash_file" => "file path (~ ok), or empty".into(),
+                Some(Kind::Text { max }) => format!("text, up to {max} chars (⏎ to type)"),
                 None => String::new(),
             },
             Item::Scalar(s) => match s.kind() {
@@ -280,7 +300,7 @@ impl Item {
     /// Takes effect only on the next start.
     pub fn restart_note(self) -> Option<&'static str> {
         match self {
-            Item::Pref("splash" | "splash_hold" | "splash_seconds") => Some("applies at next start"),
+            Item::Pref(k) if k.starts_with("splash") => Some("applies at next start"),
             Item::Scalar(Scalar::RoomsDir) if std::env::var_os("CTF_ROOT").is_some_and(|v| !v.is_empty()) => {
                 Some("$CTF_ROOT is set and wins over this")
             }
@@ -440,7 +460,11 @@ impl App {
             Ok(()) => {
                 let v = self.setting_display(it);
                 let note = it.restart_note().map(|n| format!(" ({n})")).unwrap_or_default();
-                self.set_status(format!("✓ {} = {v}{note}", it.name()));
+                let warn = match (it, &self.splash_warning) {
+                    (Item::Pref(k), Some(w)) if k.starts_with("splash") => format!(" · ⚠ {w}"),
+                    _ => String::new(),
+                };
+                self.set_status(format!("✓ {} = {v}{note}{warn}", it.name()));
             }
             Err(e) => self.set_status(format!("✗ {e}")),
         }
@@ -953,6 +977,56 @@ mod tests {
     }
 
     #[test]
+    fn animation_sections_hold_the_new_options() {
+        let mut a = app();
+        let bg = items(Sec::Background);
+        let anim = items(Sec::Animations);
+        for k in ["background", "star_parallax", "flow_angle", "matrix_charset", "snow_wind", "plasma_scale", "ripple_radius"] {
+            assert!(bg.contains(&Item::Pref(k)), "{k}");
+        }
+        for k in ["animations", "fps", "shoot_angle", "pulse_to", "burst_style", "burst_text", "splash_reveal", "splash_bg"] {
+            assert!(anim.contains(&Item::Pref(k)), "{k}");
+        }
+        assert_eq!(items(Sec::Look), vec![Item::Pref("border"), Item::Pref("marker")]);
+        // a text option is typed in and saved as-is; too long is refused
+        select(&mut a, Item::Pref("burst_text"));
+        assert_eq!(Item::Pref("burst_text").kind(), EditKind::Text);
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.settings.edit.as_deref(), Some("{WHICH} PWNED"));
+        press_mod(&mut a, KeyCode::Char('u'), M::CONTROL);
+        crate::handle_paste(&mut a, "{which} owned on {BOX}");
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.prefs.burst_text, "{which} owned on {BOX}");
+        assert_eq!(a.saved_for_tests().1["burst_text"].as_str(), Some("{which} owned on {BOX}"));
+        assert!(a.setting_parse_text(Item::Pref("splash_text"), &"x".repeat(17)).is_err());
+        // → steps ints by their step size, choices cycle; fps applies live
+        select(&mut a, Item::Pref("burst_ms"));
+        press(&mut a, KeyCode::Right);
+        assert_eq!(a.prefs.burst_ms, 1600);
+        assert_eq!(a.fx.burst_ms, 1600);
+        select(&mut a, Item::Pref("fps"));
+        press(&mut a, KeyCode::Right);
+        assert_eq!(a.frame_interval(), std::time::Duration::from_millis(1000 / 21));
+        select(&mut a, Item::Pref("splash_reveal"));
+        press(&mut a, KeyCode::Right);
+        assert_eq!(a.prefs.splash_reveal, crate::prefs::Reveal::Fade);
+        assert!(a.status.contains("next start"), "{}", a.status);
+        // a missing splash file says so (and the built-in banner stays)
+        a.set_pref("splash_banner", Val::Str("file".into())).unwrap();
+        select(&mut a, Item::Pref("splash_file"));
+        press(&mut a, KeyCode::Enter);
+        crate::handle_paste(&mut a, "/nonexistent/pivt-art.txt");
+        press(&mut a, KeyCode::Enter);
+        assert!(a.status.contains("built-in"), "{}", a.status);
+        for (w, h) in [(80, 24), (200, 60)] {
+            for sec in [Sec::Background, Sec::Animations] {
+                a.settings_goto(sec);
+                render(&a, w, h);
+            }
+        }
+    }
+
+    #[test]
     fn key_capture_adds_conflicts_and_refuses_ctrl_c() {
         let mut a = app();
         select(&mut a, Item::Key(Action::Note));
@@ -1022,7 +1096,9 @@ mod tests {
         for c in "ripple".chars() {
             press(&mut a, KeyCode::Char(c));
         }
-        assert_eq!(a.settings_rows(), vec![Item::Pref("ripple")]);
+        let rows = a.settings_rows();
+        assert_eq!(rows[0], Item::Pref("ripple"));
+        assert!(rows.iter().all(|r| r.name().contains("ripple") || r.desc().contains("ripple")), "{rows:?}");
         a.settings.filter = "reachability".into(); // show_ping's description
         assert_eq!(a.settings_rows(), vec![Item::Pref("show_ping")]);
         a.settings.filter = "Zoom".into();

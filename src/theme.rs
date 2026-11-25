@@ -206,6 +206,14 @@ theme_roles! {
     htb: "Hack The Box panel.",
 }
 
+impl Theme {
+    /// The category hues, in `CATEGORIES` order (a colour ring for
+    /// rainbow / confetti effects).
+    pub fn cat_colors(&self) -> &[Color] {
+        &self.cats
+    }
+}
+
 /// Base roles for a preset (everything except the derived defaults).
 struct Base {
     bg: u32,

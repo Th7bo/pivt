@@ -1,8 +1,10 @@
 use crate::discord::{DiscordRpc, PresenceInput, Privacy};
 
-/// Ticks (~50ms each) between rotating the presence text lines. ~15s keeps us
-/// well inside Discord's 5-updates-per-20s rate limit.
-const RPC_ROTATE_TICKS: u64 = 300;
+/// Milliseconds between rotating the presence text lines. 15 s keeps us well
+/// inside Discord's 5-updates-per-20s rate limit.
+const RPC_ROTATE_MS: u64 = 15_000;
+/// Milliseconds between presence refreshes.
+const RPC_REFRESH_MS: u64 = 5_000;
 /// Where the per-category presence badges live (`assets/presence/<cat>.png`).
 const PRESENCE_IMG_BASE: &str = "https://raw.githubusercontent.com/Th7bo/pivt/main/assets/presence";
 use crate::loot::{self, Cred};
@@ -175,13 +177,25 @@ pub const FAV_CAT: &str = "favorites";
 pub const RECENT_CAT: &str = "recent";
 pub const SUGGEST_CAT: &str = "suggested";
 const RECENT_MAX: usize = 25;
-/// Ticks between session change checks (~2s) and forced output saves (~30s).
-const SESSION_CHECK_TICKS: u64 = 40;
-const SESSION_FULL_TICKS: u64 = 600;
-/// Ticks between checks that LHOST is still a local address (~10s).
-const LHOST_CHECK_TICKS: u64 = 200;
-/// The event loop ticks at ~20 fps.
-const TICKS_PER_SEC: u64 = 20;
+/// Session change checks (2 s) and forced output saves (30 s), in ms. All
+/// housekeeping runs on the app clock (milliseconds), so it keeps the same
+/// pace whatever the `fps` cap.
+const SESSION_CHECK_MS: u64 = 2_000;
+const SESSION_FULL_MS: u64 = 30_000;
+/// Checks that LHOST is still a local address (10 s).
+const LHOST_CHECK_MS: u64 = 10_000;
+/// Scope refresh (1 s).
+const SCOPE_CHECK_MS: u64 = 1_000;
+
+/// How often each periodic chore has run (the fps tests check these keep
+/// wall-clock pace).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Chores {
+    pub scope: u64,
+    pub session: u64,
+    pub lhost: u64,
+    pub rpc: u64,
+}
 
 /// A hashcat run started from the loot view, waiting for its tab to exit.
 pub struct PendingCrack {
@@ -242,8 +256,15 @@ pub struct App {
     pub should_quit: bool,
     /// "N jobs running — quit? y/N" is showing.
     pub confirm_quit: bool,
-    pub tick: u64,
+    /// App clock in milliseconds, advanced by [`App::advance`] (real elapsed
+    /// time in the event loop, one frame per [`App::on_tick`] in tests).
+    pub ms: u64,
+    /// `ms` when the splash started.
     pub splash_start: u64,
+    /// Periodic housekeeping counters.
+    pub chores: Chores,
+    /// Why a custom splash banner isn't used (shown in the status line).
+    pub splash_warning: Option<String>,
 
     // vars overlay
     pub var_idx: usize,
@@ -307,7 +328,7 @@ pub struct App {
     // flag capture
     pub flag_is_root: bool,
     pub flag_buf: String,
-    pub burst_start: Option<u64>, // tick the flag-capture burst began
+    pub burst_start: Option<u64>, // `ms` the flag-capture burst began
     pub burst_label: String,
 
     // gtfobins lookup
@@ -352,7 +373,7 @@ pub struct App {
     pub discord_link: String,
     /// What the presence may reveal (config `discord_privacy`, `M` cycles).
     pub discord_privacy: Privacy,
-    last_rpc_tick: u64,
+    last_rpc_ms: u64,
 
     /// Rooms dir / template / target mirror, resolved from config + env.
     pub paths: Paths,
@@ -370,7 +391,7 @@ pub struct App {
     session_sig: String,
     /// Per-tab (job id, output length, finished) as last written.
     session_out: Vec<(u64, usize, bool)>,
-    session_full_tick: u64,
+    session_full_ms: u64,
 
     /// Executables on PATH (+ ~/.local/bin), scanned at startup and on `m`.
     pub tools: crate::tools::ToolIndex,
@@ -619,8 +640,10 @@ impl App {
             status: startup_status(lhost_note, &key_warnings, &pref_warnings, &keys),
             should_quit: false,
             confirm_quit: false,
-            tick: 0,
+            ms: 0,
             splash_start: 0,
+            chores: Chores::default(),
+            splash_warning: None,
             var_idx: 0,
             var_editing: false,
             var_buf: String::new(),
@@ -683,7 +706,7 @@ impl App {
             discord_app_id,
             discord_link: cfg.discord_link.clone(),
             discord_privacy: Privacy::parse(&cfg.discord_privacy),
-            last_rpc_tick: 0,
+            last_rpc_ms: 0,
             paths,
             path_cfg,
             persist: true,
@@ -691,7 +714,7 @@ impl App {
             session_dir: None,
             session_sig: String::new(),
             session_out: Vec::new(),
-            session_full_tick: 0,
+            session_full_ms: 0,
             tools: crate::tools::ToolIndex::scan(),
             tool_missing: Default::default(),
             hide_missing: cfg.hide_missing,
@@ -721,6 +744,9 @@ impl App {
             matcher: SkimMatcherV2::default(),
         };
         app.apply_prefs();
+        if let Some(w) = &app.splash_warning {
+            app.status = format!("⚠ {w} · {}", app.status);
+        }
         app.refresh_scope();
         app.refresh_missing();
         app.refresh_categories();
@@ -732,9 +758,9 @@ impl App {
         app
     }
 
-    /// Frame index within the splash (0-based).
-    pub fn splash_frame(&self) -> u64 {
-        self.tick.saturating_sub(self.splash_start)
+    /// Milliseconds into the splash.
+    pub fn splash_ms(&self) -> u64 {
+        self.ms.saturating_sub(self.splash_start)
     }
 
     pub fn end_splash(&mut self) {
@@ -745,13 +771,10 @@ impl App {
 
     /// Re-derive everything cached from `prefs` (call after changing it).
     pub fn apply_prefs(&mut self) {
+        let (fx, warning) = crate::anim::Fx::from_prefs(&self.prefs);
+        self.fx = fx;
+        self.splash_warning = warning;
         let p = &self.prefs;
-        self.fx = crate::anim::Fx {
-            density: p.bg_density,
-            ramp: p.flow_ramp(),
-            stars: p.star_set(),
-            animate: p.animations,
-        };
         // a hidden pane can't keep the focus
         if !p.show_categories && self.focus == Focus::Categories {
             self.focus = Focus::Commands;
@@ -773,6 +796,20 @@ impl App {
         Ok(())
     }
 
+    /// Apply an option for this run only, never saved (`pivt snap … --set
+    /// key=value`). `raw` is a TOML value; a bare word counts as a string.
+    pub fn pref_override(&mut self, key: &str, raw: &str) -> Result<(), String> {
+        let opt = crate::prefs::Opt::find(key).ok_or_else(|| format!("unknown option '{key}'"))?;
+        let v = toml::from_str::<toml::Table>(&format!("v = {raw}"))
+            .ok()
+            .and_then(|mut t| t.remove("v"))
+            .unwrap_or_else(|| toml::Value::String(raw.to_string()));
+        let (v, _) = opt.parse(&v)?;
+        self.prefs.set(key, v);
+        self.apply_prefs();
+        Ok(())
+    }
+
     // ── settings screen (`,`): get / set / reset by item ──
 
     /// Is this row set in config.toml (so `r` has something to remove)?
@@ -781,7 +818,7 @@ impl App {
         match it {
             Item::Pref(k) => match crate::prefs::Opt::find(k).map(|o| o.section) {
                 Some(crate::prefs::Section::Layout) => self.layout_cfg.contains_key(k),
-                Some(crate::prefs::Section::Look) => self.look_cfg.contains_key(k),
+                Some(_) => self.look_cfg.contains_key(k),
                 None => false,
             },
             Item::Scalar(s) => match s {
@@ -990,7 +1027,7 @@ impl App {
                     (S::DiscordPrivacy, Val::Str(s)) => {
                         self.discord_privacy = Privacy::parse(&s);
                         self.discord_privacy_cfg = self.discord_privacy.as_str().into();
-                        self.last_rpc_tick = 0;
+                        self.last_rpc_ms = 0;
                     }
                     (S::DiscordAppId, Val::Str(s)) => {
                         self.discord_app_id_cfg = s;
@@ -1002,12 +1039,12 @@ impl App {
                         // reconnect with the new id if the presence is running
                         if self.discord.is_some() {
                             self.discord = Some(DiscordRpc::start(self.discord_app_id.clone()));
-                            self.last_rpc_tick = 0;
+                            self.last_rpc_ms = 0;
                         }
                     }
                     (S::DiscordLink, Val::Str(s)) => {
                         self.discord_link = s;
-                        self.last_rpc_tick = 0;
+                        self.last_rpc_ms = 0;
                     }
                     (S::ScopeMode, Val::Str(s)) => {
                         self.scope_mode = crate::scope::Mode::parse(&s);
@@ -1067,7 +1104,7 @@ impl App {
                 S::DiscordPrivacy => {
                     self.discord_privacy_cfg.clear();
                     self.discord_privacy = Privacy::parse("");
-                    self.last_rpc_tick = 0;
+                    self.last_rpc_ms = 0;
                 }
                 S::DiscordAppId => {
                     let _ = self.setting_set(it, crate::prefs::Val::Str(String::new()));
@@ -1226,26 +1263,35 @@ impl App {
         crate::prefs::run_inner(ratatui::layout::Rect::new(0, 0, cols, rows), &self.prefs, fullscreen)
     }
 
-    /// Tick for animations: frozen at 0 when animations are off.
-    pub fn anim_tick(&self) -> u64 {
+    /// Clock for animations (ms): frozen at 0 when animations are off.
+    pub fn anim_ms(&self) -> u64 {
         if self.prefs.animations {
-            self.tick
+            self.ms
         } else {
             0
         }
     }
 
-    /// Tick for the background effect (slowed by `bg_slowdown`).
-    pub fn bg_tick(&self) -> u64 {
-        self.anim_tick() / self.prefs.bg_slowdown.max(1) as u64
+    /// Clock for the background effect (slowed by `bg_slowdown`).
+    pub fn bg_ms(&self) -> u64 {
+        self.anim_ms() / self.prefs.bg_slowdown.max(1) as u64
     }
 
-    /// The selected-row accent: pulsing, or steady with animations off.
+    /// Frame interval for the `fps` cap (the event loop's tick).
+    pub fn frame_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.prefs.frame_ms())
+    }
+
+    /// The selected-row accent: pulsing `pulse_from` → `pulse_to`, or steady
+    /// `pulse_from` with the pulse or animations off.
     pub fn pulse(&self) -> ratatui::style::Color {
-        if self.prefs.animations {
-            crate::anim::pulse(self.tick)
+        let t = crate::theme::theme();
+        let from = t.role(&self.fx.pulse_from).unwrap_or(t.accent);
+        if self.prefs.animations && self.fx.pulse {
+            let to = t.role(&self.fx.pulse_to).unwrap_or(t.accent_hi);
+            crate::anim::pulse(self.ms, self.fx.pulse_ms, from, to)
         } else {
-            crate::theme::theme().accent
+            from
         }
     }
 
@@ -1260,7 +1306,7 @@ impl App {
     pub fn idle_signature(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (self.tick / TICKS_PER_SEC).hash(&mut h);
+        (self.ms / 1000).hash(&mut h);
         for j in &self.runs {
             (j.output_seq(), j.exit, j.is_running()).hash(&mut h);
         }
@@ -1271,14 +1317,25 @@ impl App {
         h.finish()
     }
 
-    /// Advance animation; called once per tick from the event loop.
-    /// The splash animates to completion then holds (starfield keeps twinkling)
-    /// until the user presses a key.
+    /// One frame at the `fps` cap: advance the clock by one frame interval
+    /// (tests; the event loop passes the real elapsed time to [`Self::advance`]).
+    #[cfg(test)]
     pub fn on_tick(&mut self) {
-        self.tick += 1;
+        self.advance(self.prefs.frame_ms());
+    }
+
+    /// Advance the app clock by `dt_ms` and do the per-frame work (poll
+    /// jobs) and the periodic chores (on wall-clock intervals, so the frame
+    /// rate doesn't change their pace). The splash animates to completion
+    /// then holds until a key, or auto-continues after `splash_seconds`.
+    pub fn advance(&mut self, dt_ms: u64) {
+        let prev = self.ms;
+        self.ms += dt_ms;
+        let now = self.ms;
+        let crossed = |period: u64| prev / period != now / period;
         if self.mode == Mode::Splash
             && !self.prefs.splash_hold
-            && self.splash_frame() >= self.prefs.splash_seconds as u64 * TICKS_PER_SEC
+            && self.splash_ms() >= self.prefs.splash_seconds as u64 * 1000
         {
             self.end_splash();
         }
@@ -1309,22 +1366,30 @@ impl App {
                 self.box_epoch = Some(crate::discord::now_unix());
             }
         }
-        if self.lhost_watch && self.tick.is_multiple_of(LHOST_CHECK_TICKS) {
-            self.refresh_lhost_stale();
+        if crossed(LHOST_CHECK_MS) {
+            self.chores.lhost += 1;
+            if self.lhost_watch {
+                self.refresh_lhost_stale();
+            }
         }
-        if self.tick.is_multiple_of(20) {
+        if crossed(SCOPE_CHECK_MS) {
+            self.chores.scope += 1;
             self.refresh_scope();
         }
-        if self.session_on && self.tick.is_multiple_of(SESSION_CHECK_TICKS) {
-            let full = self.tick.saturating_sub(self.session_full_tick) >= SESSION_FULL_TICKS;
-            self.save_session(full);
+        if crossed(SESSION_CHECK_MS) {
+            self.chores.session += 1;
+            if self.session_on {
+                let full = now.saturating_sub(self.session_full_ms) >= SESSION_FULL_MS;
+                self.save_session(full);
+            }
         }
-        // Rich Presence: refresh about every 5s (not every ~50ms tick).
-        if self.discord.is_some()
-            && (self.last_rpc_tick == 0 || self.tick.saturating_sub(self.last_rpc_tick) >= 100)
-        {
-            self.last_rpc_tick = self.tick;
-            self.push_discord();
+        // Rich Presence: refresh every 5 s, not every frame
+        if self.last_rpc_ms == 0 || now.saturating_sub(self.last_rpc_ms) >= RPC_REFRESH_MS {
+            self.last_rpc_ms = now;
+            self.chores.rpc += 1;
+            if self.discord.is_some() {
+                self.push_discord();
+            }
         }
     }
 
@@ -1375,7 +1440,7 @@ impl App {
             elapsed: self.box_elapsed(),
             ports: self.vars.get("PORTS").cloned().unwrap_or_default(),
             start_epoch: self.box_epoch,
-            step: (self.tick / RPC_ROTATE_TICKS) as usize,
+            step: (self.ms / RPC_ROTATE_MS) as usize,
             link: if link.is_empty() { crate::model::REPO_URL } else { link }.to_string(),
         }
     }
@@ -1547,7 +1612,7 @@ impl App {
         self.status = s.into();
     }
 
-    /// `b`: stars → flow → off, saved as `[look] background`.
+    /// `b`: stars → flow → matrix → snow → plasma → off, saved as `[look] background`.
     pub fn toggle_bg(&mut self) {
         // the same stepping the settings screen uses
         if let (Some(opt), Some(cur)) = (crate::prefs::Opt::find("background"), self.prefs.get("background")) {
@@ -1556,6 +1621,9 @@ impl App {
         self.set_status(match self.prefs.background {
             crate::prefs::Background::Stars => "background: starfield",
             crate::prefs::Background::Flow => "background: flow field",
+            crate::prefs::Background::Matrix => "background: matrix rain",
+            crate::prefs::Background::Snow => "background: snow",
+            crate::prefs::Background::Plasma => "background: plasma",
             crate::prefs::Background::Off => "background: off",
         });
     }
@@ -1638,7 +1706,7 @@ impl App {
                 if self.discord.is_none() {
                     self.discord = Some(DiscordRpc::start(self.discord_app_id.clone()));
                 }
-                self.last_rpc_tick = 0; // push presence promptly
+                self.last_rpc_ms = 0; // push presence promptly
                 let m = self.discord_privacy;
                 self.set_status(format!(
                     "discord rich presence: on · {} ({}) · {} cycles",
@@ -1658,7 +1726,7 @@ impl App {
         self.discord_privacy = self.discord_privacy.next();
         self.discord_privacy_cfg = self.discord_privacy.as_str().to_string();
         self.persist_config();
-        self.last_rpc_tick = 0; // re-push now, so a downgrade takes effect at once
+        self.last_rpc_ms = 0; // re-push now, so a downgrade takes effect at once
         let m = self.discord_privacy;
         let off = if self.discord_rpc { "" } else { " · presence is off (D)" };
         self.set_status(format!("discord privacy: {} — {}{off}", m.as_str(), m.describe()));
@@ -2083,7 +2151,7 @@ impl App {
         };
         match r.set_platform(next) {
             Ok(()) => {
-                self.last_rpc_tick = 0;
+                self.last_rpc_ms = 0;
                 self.set_status(match next {
                     Some(p) => format!("room '{}' marked {} (public box: named in Discord safe mode)", r.name, p.label()),
                     None => format!("room '{}' unmarked (private: never named in Discord safe mode)", r.name),
@@ -2636,8 +2704,7 @@ impl App {
                 crate::htb::HtbEvent::Owned { which, value } => {
                     writeup::set_flag(self.active_room.as_ref(), &target, which, &value);
                     self.flags_captured += 1;
-                    self.burst_start = Some(self.tick);
-                    self.burst_label = format!("{} PWNED", which.to_uppercase());
+                    self.fire_burst(which);
                     self.set_status(format!("🚩 HTB accepted the {which} flag"));
                 }
                 crate::htb::HtbEvent::TaskSolved { title, question, answer } => {
@@ -3280,7 +3347,7 @@ impl App {
         // what we just loaded is what's on disk
         self.session_sig = self.session_toml(&self.build_session(false));
         self.session_out = self.runs.iter().map(|j| (j.id, j.raw_len(), j.finished)).collect();
-        self.session_full_tick = self.tick;
+        self.session_full_ms = self.ms;
 
         let when = session::age(s.saved_at, crate::discord::now_unix());
         let mut msg = format!("↺ restored session ({when})");
@@ -3374,7 +3441,7 @@ impl App {
             }
         }
         if full {
-            self.session_full_tick = self.tick;
+            self.session_full_ms = self.ms;
         }
         if sig == self.session_sig && !dirty_out {
             return;
@@ -3813,21 +3880,33 @@ impl App {
             Err(_) => "copy failed".to_string(),
         };
         self.flags_captured += 1;
-        self.burst_start = Some(self.tick);
-        self.burst_label = format!("{} PWNED", which.to_uppercase());
+        self.fire_burst(which);
         self.set_status(format!("🚩 {which} flag saved + {copied}"));
         self.mode = Mode::Normal;
     }
 
-    pub const BURST_LEN: u64 = 30;
-    /// Burst progress 0..1, or None when inactive.
+    /// Start the flag-capture burst (unless `burst = false`), with the
+    /// banner from `burst_text`.
+    pub fn fire_burst(&mut self, which: &str) {
+        if !self.prefs.burst {
+            return;
+        }
+        let target = self.vars.get("RHOST").cloned().unwrap_or_default();
+        let room = self.active_room.as_ref().map(|r| r.name.clone()).unwrap_or_default();
+        self.burst_label =
+            crate::prefs::banner_text(&self.prefs.burst_text, which, &target, &room, self.flags_captured);
+        self.burst_start = Some(self.ms);
+    }
+
+    /// Burst progress 0..1 over `burst_ms`, or None when inactive.
     pub fn burst_progress(&self) -> Option<f32> {
         let start = self.burst_start?;
-        let d = self.tick.saturating_sub(start);
-        if d >= Self::BURST_LEN {
+        let d = self.ms.saturating_sub(start);
+        let len = self.fx.burst_ms.max(1);
+        if d >= len {
             None
         } else {
-            Some(d as f32 / Self::BURST_LEN as f32)
+            Some(d as f32 / len as f32)
         }
     }
 
@@ -4635,13 +4714,22 @@ mod tests {
         let mut app = App::for_tests();
         assert!(!app.persist, "tests never write the real config");
         assert!(app.layout_cfg.is_empty() && app.look_cfg.is_empty());
+        // b cycles every background, then wraps
+        let mut seen = vec![app.prefs.background];
+        for _ in 0..Background::NAMES.len() {
+            app.toggle_bg();
+            seen.push(app.prefs.background);
+        }
+        assert_eq!(
+            seen,
+            [Background::Stars, Background::Flow, Background::Matrix, Background::Snow, Background::Plasma, Background::Off, Background::Stars]
+        );
+        app.set_pref("background", Val::Str("snow".into())).unwrap();
         app.toggle_bg();
-        assert_eq!(app.prefs.background, Background::Flow);
+        assert_eq!(app.status, "background: plasma");
         app.toggle_bg();
-        assert_eq!(app.prefs.background, Background::Off);
         assert_eq!(app.status, "background: off");
         app.toggle_bg();
-        assert_eq!(app.prefs.background, Background::Stars);
         assert_eq!(app.look_cfg.len(), 1, "{:?}", app.look_cfg);
         assert_eq!(app.look_cfg["background"].as_str(), Some("stars"));
         // validated like the file: clamped, bad shapes refused
@@ -4658,7 +4746,7 @@ mod tests {
         assert!(app.focus == Focus::Commands);
         app.set_pref("animations", Val::Bool(false)).unwrap();
         assert!(!app.fx.animate);
-        assert_eq!(app.anim_tick(), 0);
+        assert_eq!(app.anim_ms(), 0);
         assert_eq!(app.pulse(), crate::theme::theme().accent);
         app.set_pref("flow_charset", Val::Str("blocks".into())).unwrap();
         assert_eq!(app.fx.ramp, vec![' ', '░', '▒', '▓', '█']);

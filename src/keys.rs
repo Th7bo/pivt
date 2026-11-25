@@ -77,7 +77,7 @@ actions! {
     Notes => "notes", Normal, ["o"], "open room notes in $EDITOR";
     Loot => "loot", Normal, ["L"], "loot / creds";
     Favorite => "favorite", Normal, ["f"], "pin / unpin favorite";
-    Bg => "bg", Normal, ["b"], "cycle background: stars / flow / off";
+    Bg => "bg", Normal, ["b"], "cycle background: stars / flow / matrix / snow / plasma / off";
     Theme => "theme", Normal, ["t"], "next theme";
     ThemePicker => "theme_picker", Normal, ["T"], "theme picker";
     Settings => "settings", Normal, [","], "settings: every option, live";

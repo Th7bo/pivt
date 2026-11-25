@@ -1,7 +1,7 @@
 use crate::app::{AddField, App, Focus, Mode};
 use crate::keys::Action;
 use crate::model::extract_placeholders;
-use crate::prefs::{Background, Border};
+use crate::prefs::Border;
 use crate::theme::{category_style, theme};
 use ratatui::prelude::*;
 use ratatui::widgets::{
@@ -19,18 +19,8 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     // Background behind the whole UI; widgets paint on top, leaving the effect
     // only in empty cells. Cycle with 'b'.
-    match app.prefs.background {
-        Background::Flow => {
-            let tint = category_style(app.current_category().unwrap_or("")).1;
-            crate::anim::draw_flow_app(f, area, app.bg_tick(), ripple_at(app), tint, &app.fx);
-        }
-        Background::Stars => {
-            crate::anim::draw_field_app(f, area, app.bg_tick(), &app.fx);
-            if app.prefs.animations {
-                crate::anim::draw_shooting_star(f, area, app.tick, 260, false);
-            }
-        }
-        Background::Off => {}
+    if let Some(bg) = crate::anim::Bg::of(app.prefs.background) {
+        draw_bg(f, app, area, bg, false);
     }
 
     let screen = crate::prefs::split_screen(area, &app.prefs);
@@ -71,9 +61,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     // flag-capture burst, drawn on top of everything
     if let Some(p) = app.burst_progress() {
         if app.prefs.animations {
-            crate::anim::draw_burst_ring(f, area, p);
+            crate::anim::draw_burst(f.buffer_mut(), area, p, app.fx.burst_style, app.ms);
         }
-        let flash = !app.prefs.animations || (app.tick / 2) % 2 == 0;
+        let flash = !app.prefs.animations || !app.fx.burst_flash || (app.ms / 100).is_multiple_of(2);
         let msg = format!("🚩  {}  🚩", app.burst_label);
         let mw = msg.chars().count() as u16 + 4;
         let mh = 3u16;
@@ -96,6 +86,21 @@ pub fn draw(f: &mut Frame, app: &App) {
             .block(block),
             r,
         );
+    }
+}
+
+/// A background effect (+ shooting stars over the starfield); `loud` for the
+/// splash.
+fn draw_bg(f: &mut Frame, app: &App, area: Rect, bg: crate::anim::Bg, loud: bool) {
+    let sc = crate::anim::Scene {
+        ms: app.bg_ms(),
+        mouse: ripple_at(app),
+        tint: category_style(app.current_category().unwrap_or("")).1,
+        loud,
+    };
+    crate::anim::draw_background(f.buffer_mut(), area, bg, &sc, &app.fx);
+    if bg == crate::anim::Bg::Stars && app.prefs.animations && app.fx.shoot {
+        crate::anim::draw_shooting_star(f.buffer_mut(), area, app.anim_ms(), &app.fx, loud);
     }
 }
 
@@ -139,7 +144,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 
     // logo — twinkling accent star + active room
     if let Some(r) = h.logo {
-        let star = if p.animations { ['✦', '✧', '⋆', '✦'][(app.tick / 8 % 4) as usize] } else { '✦' };
+        let star = if p.animations { ['✦', '✧', '⋆', '✦'][(app.ms / 400 % 4) as usize] } else { '✦' };
         let mut logo_spans = vec![
             Span::styled(format!(" {star} "), Style::default().fg(theme().accent)),
             Span::styled("pivt", Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)),
@@ -1632,7 +1637,7 @@ fn draw_htb_input(f: &mut Frame, app: &App, area: Rect) {
         Some(HtbInput::Answer(b)) => ("answer › ", b),
         None => return,
     };
-    let cursor = if app.anim_tick() / 10 % 2 == 0 { "▌" } else { " " };
+    let cursor = if (app.anim_ms() / 500).is_multiple_of(2) { "▌" } else { " " };
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(format!(" {label}"), Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)),
@@ -2164,93 +2169,46 @@ fn draw_field(f: &mut Frame, app: &App, area: Rect, label: &str, val: &str, acti
 
 fn draw_splash(f: &mut Frame, app: &App, area: Rect) {
     // animations off: the finished banner, prompt steady
-    let frame = if app.prefs.animations { app.splash_frame() } else { 18 };
+    let el = if app.prefs.animations { app.splash_ms() } else { u64::MAX / 4 };
     // bold background behind the banner
-    match app.prefs.background {
-        Background::Flow => crate::anim::draw_flow_splash(f, area, app.bg_tick(), ripple_at(app), &app.fx),
-        Background::Stars => {
-            crate::anim::draw_field_splash(f, area, app.bg_tick(), &app.fx);
-            if app.prefs.animations {
-                crate::anim::draw_shooting_star(f, area, app.tick, 44, true);
-            }
-        }
-        Background::Off => {}
+    if let Some(bg) = crate::anim::Bg::of_splash(app.prefs.splash_bg, app.prefs.background) {
+        draw_bg(f, app, area, bg, true);
     }
-
-    let banner = crate::anim::BANNER;
-    let w = banner.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
-    let h = banner.len() as u16;
-    if area.width < w + 2 || area.height < h + 6 {
-        return; // too small; just show starfield
-    }
-    let bx = area.x + (area.width - w) / 2;
-    let by = area.y + area.height / 2 - (h / 2) - 1;
-
-    // typewriter reveal across columns
-    const REVEAL: u64 = 15;
-    let reveal_cols = if frame >= REVEAL {
-        w as usize
-    } else {
-        ((frame as usize * w as usize) / REVEAL as usize).max(1)
+    let Some(b) = crate::anim::draw_banner(f.buffer_mut(), area, &app.fx, el) else {
+        return; // too small; just the background
     };
-
-    let mut lines: Vec<Line> = Vec::new();
-    for row in banner {
-        let chars: Vec<char> = row.chars().collect();
-        let mut spans: Vec<Span> = Vec::new();
-        let shown = reveal_cols.min(chars.len());
-        if shown > 0 {
-            let body: String = chars[..shown.saturating_sub(1)].iter().collect();
-            spans.push(Span::styled(
-                body,
-                Style::default().fg(theme().accent).add_modifier(Modifier::BOLD),
-            ));
-            // leading edge glows brighter while still revealing
-            let edge: String = chars[shown.saturating_sub(1)..shown].iter().collect();
-            let edge_color = if reveal_cols < w as usize { theme().star_hi } else { theme().accent };
-            spans.push(Span::styled(
-                edge,
-                Style::default().fg(edge_color).add_modifier(Modifier::BOLD),
-            ));
-        }
-        lines.push(Line::from(spans));
-    }
-    let banner_rect = Rect::new(bx, by, w, h);
-    f.render_widget(Paragraph::new(lines), banner_rect);
-
-    // underline rule that draws across after the banner lands
-    if frame >= REVEAL {
-        let rule_w = w;
-        let rule: String = "─".repeat(rule_w as usize);
-        let rule_rect = Rect::new(bx, by + h, w, 1);
+    let revealed = el >= app.fx.reveal_ms;
+    // underline rule + subtitle once the banner has landed (when there's room)
+    if revealed && b.bottom() < area.bottom() {
+        let rule: String = "─".repeat(b.width as usize);
         f.render_widget(
             Paragraph::new(Span::styled(rule, Style::default().fg(theme().border))),
-            rule_rect,
+            Rect::new(b.x, b.bottom(), b.width, 1),
         );
-        // subtitle
-        let sub = "c t f   t o o l k i t";
-        let sw = sub.chars().count() as u16;
-        let sx = area.x + (area.width.saturating_sub(sw)) / 2;
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                sub,
-                Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD),
-            )),
-            Rect::new(sx, by + h + 1, sw, 1),
-        );
+        let raw = app.fx.subtitle.trim();
+        let spaced = crate::anim::spaced(raw);
+        let sub = if spaced.chars().count() <= area.width as usize { spaced } else { raw.to_string() };
+        if !sub.is_empty() && b.bottom() + 1 < area.bottom() {
+            let sw = (Span::raw(sub.as_str()).width() as u16).min(area.width);
+            let sx = area.x + (area.width - sw) / 2;
+            f.render_widget(
+                Paragraph::new(Span::styled(sub, Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD))),
+                Rect::new(sx, b.bottom() + 1, sw, 1),
+            );
+        }
     }
 
     // blinking prompt near the bottom
-    if frame >= REVEAL + 3 {
-        let blink_on = !app.prefs.animations || (frame / 3) % 2 == 0;
+    let prompt_y = area.y + area.height.saturating_sub(2);
+    if el >= app.fx.reveal_ms + 150 && prompt_y > b.bottom() + 1 {
+        let blink_on = !app.prefs.animations || (el / 150) % 2 == 0;
         if blink_on {
             let msg = if app.prefs.splash_hold { "✦  press any key  ✦" } else { "✦  any key skips  ✦" };
-            let mw = msg.chars().count() as u16;
-            let mx = area.x + (area.width.saturating_sub(mw)) / 2;
-            let my = area.y + area.height - 2;
+            let mw = (msg.chars().count() as u16).min(area.width);
+            let mx = area.x + (area.width - mw) / 2;
             f.render_widget(
                 Paragraph::new(Span::styled(msg, Style::default().fg(theme().dim))),
-                Rect::new(mx, my, mw, 1),
+                Rect::new(mx, prompt_y, mw, 1),
             );
         }
     }
