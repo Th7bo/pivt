@@ -104,10 +104,43 @@ pub fn has_category_style(name: &str) -> bool {
 /// back to a diamond in the accent colour.
 pub fn category_style(name: &str) -> (char, Color) {
     let t = theme();
-    match cat_index(name) {
+    let (mut glyph, mut color) = match cat_index(name) {
         Some(i) => (CATEGORIES[i].1, t.cats[i]),
         None => ('◆', t.accent),
+    };
+    // user overrides from [look.categories]
+    if let Ok(o) = CAT_OVERRIDES.read() {
+        if let Some(st) = o.iter().find(|s| s.name == name) {
+            glyph = st.glyph.unwrap_or(glyph);
+            color = match &st.color {
+                Some(CatColor::Hex(c)) => *c,
+                Some(CatColor::Role(r)) => t.role(r).unwrap_or(color),
+                None => color,
+            };
+        }
     }
+    (glyph, color)
+}
+
+use crate::prefs::{CatColor, CatStyle};
+
+/// `[look.categories]` overrides, consulted by [`category_style`].
+static CAT_OVERRIDES: RwLock<Vec<CatStyle>> = RwLock::new(Vec::new());
+
+/// Replace the category glyph/colour overrides.
+pub fn set_category_overrides(o: Vec<CatStyle>) {
+    if let Ok(mut w) = CAT_OVERRIDES.write() {
+        *w = o;
+    }
+}
+
+/// `#rrggbb` / `#rgb`, or the name of a theme role (`accent`, `ok`, …).
+pub fn parse_color_spec(s: &str) -> Option<CatColor> {
+    let s = s.trim();
+    if s.starts_with('#') {
+        return parse_hex(s).map(CatColor::Hex);
+    }
+    theme().role(s).map(|_| CatColor::Role(s.to_string()))
 }
 
 // ─────────────────────────────── roles ───────────────────────────────
@@ -134,7 +167,6 @@ macro_rules! theme_roles {
                     _ => None,
                 }
             }
-            #[cfg(test)]
             pub fn role(&self, role: &str) -> Option<Color> {
                 match role {
                     $(stringify!($role) => Some(self.$role),)*

@@ -162,6 +162,14 @@ pub struct Config {
     /// field, and it's only written when the user set something.
     #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
     pub keys: toml::Table,
+    /// `[layout]`: pane sizes / visibility, header items, compact mode. Raw
+    /// like `[keys]`, see [`crate::prefs`]; only what the user set is saved.
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
+    pub layout: toml::Table,
+    /// `[look]`: background, splash, animations, borders, glyphs, and
+    /// `[look.categories]` glyph/colour overrides. Raw, like `[layout]`.
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
+    pub look: toml::Table,
 }
 
 /// Write a file only its owner can read (0600), tightening an existing one.
@@ -742,6 +750,33 @@ mod tests {
         assert!(w.is_empty(), "{w:?}");
         assert_eq!(m.label(crate::keys::Action::Run), "X");
         assert_eq!(m.label(crate::keys::Action::History), "y / ^r");
+    }
+
+    #[test]
+    fn config_layout_look_roundtrip_and_order() {
+        // nothing written for a default config
+        let txt = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(!txt.contains("layout") && !txt.contains("look"), "{txt}");
+        let src = "theme = \"nord\"\n[layout]\ncompact = true\ncategories_width = 999\n[look]\nborder = \"thick\"\nbogus = \"x\"\n[look.categories]\nweb = { glyph = \"W\", color = \"ok\" }\n[vars]\nRHOST = \"10.0.0.1\"\n";
+        let mut c: Config = toml::from_str(src).unwrap();
+        c.favorites.push("nmap/Quick".into());
+        let txt = toml::to_string_pretty(&c).unwrap();
+        let first_table = ["[layout]", "[look]", "[vars]"].iter().filter_map(|t| txt.find(t)).min().expect(&txt);
+        for scalar in ["favorites", "theme", "flow_bg"] {
+            assert!(txt.find(scalar).unwrap() < first_table, "{scalar} after a table:\n{txt}");
+        }
+        let back: Config = toml::from_str(&txt).unwrap();
+        // written back exactly as the user had it: junk + out-of-range kept, no defaults added
+        assert_eq!(back.layout, c.layout);
+        assert_eq!(back.look, c.look);
+        assert_eq!(back.layout.len(), 2);
+        assert_eq!(back.look["bogus"].as_str(), Some("x"));
+        assert!(!txt.contains("show_preview") && !txt.contains("animations"), "{txt}");
+        let (p, w) = crate::prefs::Prefs::load(&back.layout, &back.look, back.flow_bg);
+        assert!(p.compact && p.categories_width == 40 && p.border == crate::prefs::Border::Thick);
+        assert_eq!(w.len(), 2, "{w:?}"); // clamp + unknown key
+        let (cats, w) = crate::prefs::parse_categories(&back.look);
+        assert!(w.is_empty() && cats[0].glyph == Some('W'));
     }
 
     #[test]

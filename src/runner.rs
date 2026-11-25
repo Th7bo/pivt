@@ -1,7 +1,7 @@
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
@@ -35,6 +35,8 @@ pub struct RunJob {
     master: Option<Box<dyn MasterPty + Send>>,
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
     eof: Arc<AtomicBool>,
+    /// Bytes read from the PTY so far (redraw trigger; `raw` is capped).
+    seen: Arc<AtomicUsize>,
     pub exit: Option<i32>,
     pub finished: bool,
     pub scroll: usize,
@@ -98,6 +100,7 @@ impl RunJob {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK)));
         let raw = Arc::new(Mutex::new(String::new()));
         let eof = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(AtomicUsize::new(0));
         let (log, log_tx) = match log.and_then(|p| start_log(&p, &title, &cmd, cwd).map(|tx| (p, tx))) {
             Some((p, tx)) => (Some(p), Some(tx)),
             None => (None, None),
@@ -106,6 +109,7 @@ impl RunJob {
             let p = parser.clone();
             let rawc = raw.clone();
             let e = eof.clone();
+            let seen = seen.clone();
             let tee = log_tx.clone();
             thread::spawn(move || {
                 let mut buf = [0u8; 8192];
@@ -113,6 +117,7 @@ impl RunJob {
                     match reader.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
+                            seen.fetch_add(n, Ordering::Relaxed);
                             // never blocks: the log writer has its own thread
                             if let Some(t) = &tee {
                                 let _ = t.send(LogMsg::Data(buf[..n].to_vec()));
@@ -144,6 +149,7 @@ impl RunJob {
             master: Some(pair.master),
             child: Some(child),
             eof,
+            seen,
             exit: None,
             finished: false,
             scroll: 0,
@@ -188,6 +194,7 @@ impl RunJob {
             master: None,
             child: None,
             eof: Arc::new(AtomicBool::new(true)),
+            seen: Arc::new(AtomicUsize::new(0)),
             exit,
             finished: true,
             scroll: 0,
@@ -205,6 +212,11 @@ impl RunJob {
     /// Full captured output (ANSI stripped) for parsing.
     pub fn raw_text(&self) -> String {
         self.raw.lock().map(|r| r.clone()).unwrap_or_default()
+    }
+
+    /// Total bytes the program has written; grows with every chunk.
+    pub fn output_seq(&self) -> usize {
+        self.seen.load(Ordering::Relaxed)
     }
 
     /// Size of the captured output, a cheap "has it changed" fingerprint.
@@ -542,19 +554,6 @@ pub fn prepare_output_dirs(cmd: &str, cwd: &Path) -> Vec<String> {
         }
     }
     made
-}
-
-/// Approximate the run pane's inner (rows, cols) from the current terminal size,
-/// matching the layout in ui.rs (bottom ~42% of the body, minus borders).
-pub fn pane_size(fullscreen: bool) -> (u16, u16) {
-    let (cols, rows) = crossterm::terminal::size().unwrap_or((100, 32));
-    // body = total - header(3) - footer(1); run pane = 42% of body (or all of
-    // it when zoomed), minus panel border (2) and the tab-bar row (1).
-    let body = rows.saturating_sub(4);
-    let run_h = if fullscreen { body } else { (body as u32 * 42 / 100) as u16 };
-    let inner_rows = run_h.saturating_sub(3).max(4);
-    let inner_cols = cols.saturating_sub(2).max(20);
-    (inner_rows, inner_cols)
 }
 
 #[cfg(test)]

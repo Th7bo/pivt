@@ -1,6 +1,7 @@
 use crate::app::{AddField, App, Focus, Mode};
 use crate::keys::Action;
 use crate::model::extract_placeholders;
+use crate::prefs::{Background, Border};
 use crate::theme::{category_style, theme};
 use ratatui::prelude::*;
 use ratatui::widgets::{
@@ -17,27 +18,27 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 
     // Background behind the whole UI; widgets paint on top, leaving the effect
-    // only in empty cells. Toggle with 'b'.
-    if app.flow_bg {
-        let tint = category_style(app.current_category().unwrap_or("")).1;
-        crate::anim::draw_flow_app(f, area, app.tick, app.mouse, tint);
-    } else {
-        crate::anim::draw_field_app(f, area, app.tick);
-        crate::anim::draw_shooting_star(f, area, app.tick, 260, false);
+    // only in empty cells. Cycle with 'b'.
+    match app.prefs.background {
+        Background::Flow => {
+            let tint = category_style(app.current_category().unwrap_or("")).1;
+            crate::anim::draw_flow_app(f, area, app.bg_tick(), ripple_at(app), tint, &app.fx);
+        }
+        Background::Stars => {
+            crate::anim::draw_field_app(f, area, app.bg_tick(), &app.fx);
+            if app.prefs.animations {
+                crate::anim::draw_shooting_star(f, area, app.tick, 260, false);
+            }
+        }
+        Background::Off => {}
     }
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // header
-            Constraint::Min(5),    // body
-            Constraint::Length(1), // footer
-        ])
-        .split(area);
-
-    draw_header(f, app, chunks[0]);
-    draw_body(f, app, chunks[1]);
-    draw_footer(f, app, chunks[2]);
+    let screen = crate::prefs::split_screen(area, &app.prefs);
+    if let Some(h) = screen.header {
+        draw_header(f, app, h);
+    }
+    draw_body(f, app, screen.body);
+    draw_footer(f, app, screen.footer);
 
     match app.mode {
         Mode::Vars => draw_vars(f, app),
@@ -68,19 +69,21 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     // flag-capture burst, drawn on top of everything
     if let Some(p) = app.burst_progress() {
-        crate::anim::draw_burst_ring(f, area, p);
-        let flash = (app.tick / 2) % 2 == 0;
+        if app.prefs.animations {
+            crate::anim::draw_burst_ring(f, area, p);
+        }
+        let flash = !app.prefs.animations || (app.tick / 2) % 2 == 0;
         let msg = format!("🚩  {}  🚩", app.burst_label);
         let mw = msg.chars().count() as u16 + 4;
         let mh = 3u16;
         let mx = area.x + area.width.saturating_sub(mw) / 2;
-        let my = area.y + area.height / 2 - 1;
+        let my = (area.y + area.height / 2).saturating_sub(1);
         let r = Rect::new(mx, my, mw.min(area.width), mh.min(area.height));
         f.render_widget(Clear, r);
         let color = if flash { theme().ok } else { theme().star_hi };
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_type(BorderType::Double)
+            .border_type(if app.prefs.border == Border::Rounded { BorderType::Double } else { btype(app) })
             .border_style(Style::default().fg(color))
             .style(Style::default().bg(theme().bg));
         f.render_widget(
@@ -95,11 +98,31 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 }
 
-fn panel(title: &str, focused: bool) -> Block<'_> {
+/// Mouse position for the flow ripple (None when `ripple` is off).
+fn ripple_at(app: &App) -> Option<(u16, u16)> {
+    app.mouse.filter(|_| app.prefs.ripple)
+}
+
+/// Border type for every box (popups too).
+fn btype(app: &App) -> BorderType {
+    app.prefs.border.border_type()
+}
+
+/// Border lines for the main panes and header boxes: none in compact mode
+/// or with `border = "none"` (popups always keep theirs).
+fn pane_borders(app: &App) -> Borders {
+    if app.prefs.compact || app.prefs.border == Border::None {
+        Borders::NONE
+    } else {
+        Borders::ALL
+    }
+}
+
+fn panel<'a>(app: &App, title: &'a str, focused: bool) -> Block<'a> {
     let border = if focused { theme().border_hi } else { theme().border };
     Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .borders(pane_borders(app))
+        .border_type(btype(app))
         .border_style(Style::default().fg(border))
         .title(Span::styled(
             format!(" {title} "),
@@ -110,52 +133,57 @@ fn panel(title: &str, focused: bool) -> Block<'_> {
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(22), // logo
-            Constraint::Min(16),    // search
-            Constraint::Length(40), // target strip
-        ])
-        .split(area);
+    let h = crate::prefs::split_header(area, &app.prefs);
+    let p = &app.prefs;
 
     // logo — twinkling accent star + active room
-    let star = ['✦', '✧', '⋆', '✦'][(app.tick / 8 % 4) as usize];
-    let mut logo_spans = vec![
-        Span::styled(format!(" {star} "), Style::default().fg(theme().accent)),
-        Span::styled("pivt", Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)),
-    ];
-    if let Some(r) = &app.active_room {
-        let mut name = r.name.clone();
-        if name.chars().count() > 10 {
-            name = name.chars().take(9).collect();
-            name.push('…');
+    if let Some(r) = h.logo {
+        let star = if p.animations { ['✦', '✧', '⋆', '✦'][(app.tick / 8 % 4) as usize] } else { '✦' };
+        let mut logo_spans = vec![
+            Span::styled(format!(" {star} "), Style::default().fg(theme().accent)),
+            Span::styled("pivt", Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)),
+        ];
+        if let Some(room) = &app.active_room {
+            let max = (r.width as usize).saturating_sub(12).clamp(1, 10);
+            let mut name = room.name.clone();
+            if name.chars().count() > max {
+                name = name.chars().take(max - 1).collect();
+                name.push('…');
+            }
+            logo_spans.push(Span::styled(" ▸ ", Style::default().fg(theme().dim)));
+            logo_spans.push(Span::styled(name, Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD)));
         }
-        logo_spans.push(Span::styled(" ▸ ", Style::default().fg(theme().dim)));
-        logo_spans.push(Span::styled(name, Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD)));
+        header_box(f, app, r, Line::from(logo_spans), bare_block(app, theme().border));
     }
-    f.render_widget(Paragraph::new(Line::from(logo_spans)).block(bare_block(theme().border)), cols[0]);
 
     // search
-    let searching = app.mode == Mode::Search;
-    let content: Line = if app.search.is_empty() && !searching {
-        Line::from(vec![
-            Span::styled("  / ", Style::default().fg(theme().accent)),
-            Span::styled("search commands…", Style::default().fg(theme().dim)),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled("  / ", Style::default().fg(theme().accent)),
-            Span::styled(app.search.clone(), Style::default().fg(theme().fg).add_modifier(Modifier::BOLD)),
-            Span::styled(if searching { "▏" } else { "" }, Style::default().fg(theme().accent)),
-        ])
-    };
-    f.render_widget(
-        Paragraph::new(content).block(bare_block(if searching { theme().border_hi } else { theme().border })),
-        cols[1],
-    );
+    if let Some(r) = h.search {
+        let searching = app.mode == Mode::Search;
+        let content: Line = if app.search.is_empty() && !searching {
+            Line::from(vec![
+                Span::styled("  / ", Style::default().fg(theme().accent)),
+                Span::styled("search commands…", Style::default().fg(theme().dim)),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled("  / ", Style::default().fg(theme().accent)),
+                Span::styled(app.search.clone(), Style::default().fg(theme().fg).add_modifier(Modifier::BOLD)),
+                Span::styled(if searching { "▏" } else { "" }, Style::default().fg(theme().accent)),
+            ])
+        };
+        let block = bare_block(app, if searching { theme().border_hi } else { theme().border });
+        header_box(f, app, r, content, block);
+    }
 
-    // target strip — ◎ target   ⇡ listener
+    if let Some(r) = h.target {
+        draw_target(f, app, r);
+    }
+}
+
+/// Target box: ● RHOST ✓  ⇡ LHOST:LPORT, with the scope badge and box timer
+/// in its border (inline when there are no borders). Each part can be hidden.
+fn draw_target(f: &mut Frame, app: &App, area: Rect) {
+    let p = &app.prefs;
     let rhost = app.vars.get("RHOST").cloned().unwrap_or_default();
     let lhost = app.vars.get("LHOST").cloned().unwrap_or_default();
     let lport = app.vars.get("LPORT").cloned().unwrap_or_default();
@@ -171,58 +199,93 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     } else {
         format!("{}:{}", if lhost.is_empty() { "·" } else { &lhost }, if lport.is_empty() { "·" } else { &lport })
     };
-    // reachability dot (background ping)
     let ping = app.ping();
-    let dot = match ping.up {
-        Some(true) => Span::styled("● ", Style::default().fg(theme().ok)),
-        Some(false) => Span::styled("● ", Style::default().fg(theme().warn)),
-        None => Span::styled("○ ", Style::default().fg(theme().dim)),
-    };
+    let mut spans = vec![Span::raw(" ")];
+    // reachability dot (background ping)
+    if p.show_ping {
+        spans.push(match ping.up {
+            Some(true) => Span::styled("● ", Style::default().fg(theme().ok)),
+            Some(false) => Span::styled("● ", Style::default().fg(theme().warn)),
+            None => Span::styled("○ ", Style::default().fg(theme().dim)),
+        });
+    }
+    spans.push(v(&rhost, "no target"));
     // ✓ / ⚠: RHOST inside / outside the active room's scope
-    let mark = match app.rhost_in_scope() {
-        Some(true) => Span::styled(" ✓", Style::default().fg(theme().ok)),
-        Some(false) => Span::styled(" ⚠", Style::default().fg(theme().warn).add_modifier(Modifier::BOLD)),
-        None => Span::raw(""),
-    };
-    let targets = Line::from(vec![
-        Span::raw(" "),
-        dot,
-        v(&rhost, "no target"),
-        mark,
-        Span::styled("  ⇡ ", Style::default().fg(theme().accent2)),
-        if lhost.is_empty() && lport.is_empty() {
+    if p.show_scope {
+        match app.rhost_in_scope() {
+            Some(true) => spans.push(Span::styled(" ✓", Style::default().fg(theme().ok))),
+            Some(false) => spans.push(Span::styled(" ⚠", Style::default().fg(theme().warn).add_modifier(Modifier::BOLD))),
+            None => {}
+        }
+    }
+    if p.show_lhost {
+        spans.push(Span::styled("  ⇡ ", Style::default().fg(theme().accent2)));
+        spans.push(if lhost.is_empty() && lport.is_empty() {
             Span::styled("no listener", Style::default().fg(theme().warn))
         } else if app.lhost_stale {
             Span::styled(format!("{listener} ⚠ not local"), Style::default().fg(theme().warn).add_modifier(Modifier::BOLD))
         } else {
             Span::styled(listener, Style::default().fg(theme().ok).add_modifier(Modifier::BOLD))
-        },
-    ]);
+        });
+    }
     // box timer (+ rtt) on the right of the target border
     let via = ping.tcp_port.map(|p| format!(" tcp/{p}")).unwrap_or_default();
-    let timer = match (app.box_elapsed(), ping.rtt_ms) {
-        (Some(t), Some(r)) => format!(" ⏱ {t} · {r}ms{via} "),
-        (Some(t), None) => format!(" ⏱ {t} "),
+    let timer = match (p.show_timer, app.box_elapsed(), ping.rtt_ms) {
+        (false, ..) => String::new(),
+        (true, Some(t), Some(r)) => format!(" ⏱ {t} · {r}ms{via} "),
+        (true, Some(t), None) => format!(" ⏱ {t} "),
         _ => String::new(),
     };
-    let mut title = vec![Span::styled(" target ", Style::default().fg(theme().dim))];
-    if app.active_room.is_some() {
+    let scope = (p.show_scope && app.active_room.is_some()).then(|| {
         let n = app.scope.entries.len();
         let color = if n == 0 || app.rhost_in_scope() == Some(false) { theme().warn } else { theme().accent2 };
-        title.push(Span::styled(format!("⊙ scope: {n} "), Style::default().fg(color)));
+        Span::styled(format!("⊙ scope: {n} "), Style::default().fg(color))
+    });
+    if pane_borders(app) == Borders::NONE {
+        // no border to hang the badges on: append them to the line
+        if let Some(s) = scope {
+            spans.push(Span::raw("  "));
+            spans.push(s);
+        }
+        if !timer.is_empty() {
+            spans.push(Span::styled(timer, Style::default().fg(theme().dim)));
+        }
+        header_box(f, app, area, Line::from(spans), Block::default());
+        return;
     }
-    let mut block = bare_block(theme().border).title(Line::from(title));
+    let mut title = vec![Span::styled(" target ", Style::default().fg(theme().dim))];
+    title.extend(scope);
+    let mut block = bare_block(app, theme().border).title(Line::from(title));
     if !timer.is_empty() {
         block = block.title(Line::from(Span::styled(timer, Style::default().fg(theme().dim))).right_aligned());
     }
-    f.render_widget(Paragraph::new(targets).block(block), cols[2]);
+    f.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
 }
 
-fn bare_block(border: Color) -> Block<'static> {
+fn bare_block(app: &App, border: Color) -> Block<'static> {
+    Block::default()
+        .borders(pane_borders(app))
+        .border_type(btype(app))
+        .border_style(Style::default().fg(border))
+}
+
+/// A box inside a popup: always bordered.
+fn box_block(app: &App, border: Color) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(border))
+}
+
+/// Render a one-line header box: bordered as usual, or (no borders) its
+/// line centred vertically in `area`.
+fn header_box(f: &mut Frame, app: &App, area: Rect, line: Line, block: Block) {
+    if pane_borders(app) == Borders::NONE {
+        let r = Rect::new(area.x, area.y + area.height.saturating_sub(1) / 2, area.width, 1.min(area.height));
+        f.render_widget(Paragraph::new(line), r);
+    } else {
+        f.render_widget(Paragraph::new(line).block(block), area);
+    }
 }
 
 fn draw_body(f: &mut Frame, app: &App, area: Rect) {
@@ -231,38 +294,22 @@ fn draw_body(f: &mut Frame, app: &App, area: Rect) {
         draw_run(f, app, area);
         return;
     }
-    // reserve the lower part for the run pane when it's visible
-    let (top, run) = if app.show_run && !app.runs.is_empty() {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(6), Constraint::Percentage(42)])
-            .split(area);
-        (rows[0], Some(rows[1]))
-    } else {
-        (area, None)
-    };
-
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(20),
-            Constraint::Percentage(42),
-            Constraint::Min(30),
-        ])
-        .split(top);
-
-    draw_categories(f, app, cols[0]);
-    draw_commands(f, app, cols[1]);
-    draw_preview(f, app, cols[2]);
-
-    if let Some(run_area) = run {
-        draw_run(f, app, run_area);
+    let b = crate::prefs::split_body(area, &app.prefs, app.show_run && !app.runs.is_empty());
+    if let Some(r) = b.categories {
+        draw_categories(f, app, r);
+    }
+    draw_commands(f, app, b.commands);
+    if let Some(r) = b.preview {
+        draw_preview(f, app, r);
+    }
+    if let Some(r) = b.run {
+        draw_run(f, app, r);
     }
 }
 
 fn draw_run(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Run && app.mode == Mode::Normal;
-    let mut block = panel("run", focused).style(Style::default().bg(theme().bg));
+    let mut block = panel(app, "run", focused).style(Style::default().bg(theme().bg));
     if let Some(job) = app.active_run() {
         let maxw = area.width.saturating_sub(10) as usize;
         let mut c = job.cmd.clone();
@@ -292,7 +339,7 @@ fn draw_run(f: &mut Frame, app: &App, area: Rect) {
     for (i, job) in app.runs.iter().enumerate() {
         let active = i == app.run_tab;
         let (glyph, gcol) = if job.is_running() {
-            ("●", crate::anim::pulse(app.tick))
+            ("●", app.pulse())
         } else if job.restored.is_some() {
             ("◌", theme().dim)
         } else if job.exit == Some(0) {
@@ -318,7 +365,7 @@ fn draw_run(f: &mut Frame, app: &App, area: Rect) {
     // status badge (right of the tab bar)
     if let Some(job) = app.active_run() {
         let badge = if job.is_running() {
-            Span::styled(" running ", Style::default().fg(theme().bg).bg(crate::anim::pulse(app.tick)))
+            Span::styled(" running ", Style::default().fg(theme().bg).bg(app.pulse()))
         } else if let Some(was_running) = job.restored {
             let what = match (was_running, job.exit) {
                 (true, _) => "was running".to_string(),
@@ -439,7 +486,7 @@ fn draw_categories(f: &mut Frame, app: &App, area: Rect) {
             let sel = i == app.cat_idx && !searching;
             let (glyph, color) = category_style(c);
             let mark = if sel {
-                Span::styled("▎", Style::default().fg(crate::anim::pulse(app.tick)))
+                Span::styled(app.marker(), Style::default().fg(app.pulse()))
             } else {
                 Span::raw(" ")
             };
@@ -462,7 +509,7 @@ fn draw_categories(f: &mut Frame, app: &App, area: Rect) {
         state.select(Some(app.cat_idx));
     }
     let list = List::new(items)
-        .block(panel("categories", focused))
+        .block(panel(app, "categories", focused))
         .highlight_style(Style::default().bg(theme().sel_bg));
     f.render_stateful_widget(list, area, &mut state);
 }
@@ -485,7 +532,7 @@ fn draw_commands(f: &mut Frame, app: &App, area: Rect) {
             let (glyph, color) = category_style(&c.category);
             let missing = !app.missing_tools(c).is_empty();
             let mark = if sel {
-                Span::styled("▎", Style::default().fg(crate::anim::pulse(app.tick)))
+                Span::styled(app.marker(), Style::default().fg(app.pulse()))
             } else {
                 Span::raw(" ")
             };
@@ -531,7 +578,7 @@ fn draw_commands(f: &mut Frame, app: &App, area: Rect) {
         state.select(Some(app.cmd_idx));
     }
     let list = List::new(items)
-        .block(panel(&title, focused))
+        .block(panel(app, &title, focused))
         .highlight_style(Style::default().bg(theme().sel_bg));
     f.render_stateful_widget(list, area, &mut state);
 }
@@ -635,7 +682,7 @@ fn push_word(spans: &mut Vec<Span<'static>>, word: &str, base: Style) {
 
 fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Preview && app.mode == Mode::Normal;
-    let block = panel("preview", focused);
+    let block = panel(app, "preview", focused);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -704,8 +751,8 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
 
     // command box with a copy hint on the right
     let cmd_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .borders(pane_borders(app))
+        .border_type(btype(app))
         .border_style(Style::default().fg(theme().accent).add_modifier(Modifier::DIM))
         .title(Span::styled(" command ", Style::default().fg(theme().accent)))
         .title(
@@ -770,7 +817,7 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
         let val = app.vars.get(ph).cloned().unwrap_or_default();
 
         let gutter = if editing {
-            Span::styled(" ▸ ", Style::default().fg(crate::anim::pulse(app.tick)))
+            Span::styled(" ▸ ", Style::default().fg(app.pulse()))
         } else if sel {
             Span::styled(" ▸ ", Style::default().fg(theme().accent))
         } else {
@@ -809,6 +856,12 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     // run-pane focus has its own hint set
     let k = &app.keys;
+    // show_hints off: just the status line in normal mode (popups keep
+    // their hints, their keys aren't listed anywhere else)
+    if app.mode == Mode::Normal && !app.prefs.show_hints {
+        render_footer::<&str>(f, app, area, &[]);
+        return;
+    }
     if app.mode == Mode::Normal && app.focus == Focus::Run {
         let zoom = if app.run_fullscreen { "unzoom" } else { "zoom" };
         let scroll = || first_pair(k, Action::ScrollDown, Action::ScrollUp);
@@ -895,9 +948,15 @@ fn render_footer<K: AsRef<str>>(f: &mut Frame, app: &App, area: Rect, pairs: &[(
     }
     spans.push(Span::raw(" "));
 
+    // hints get what they need; the status keeps 10 columns, or up to 30%
+    // of the row while it shows a warning (narrow terminals)
+    let need = Line::from(spans.clone()).width() as u16;
+    let keep = if app.status.starts_with('⚠') { area.width * 3 / 10 } else { 10 };
+    let status_w = (Span::raw(app.status.as_str()).width() as u16).min(keep);
+    let hints_w = if pairs.is_empty() { 0 } else { need.min(80).min(area.width.saturating_sub(status_w)) };
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(10), Constraint::Length(80)])
+        .constraints([Constraint::Min(10), Constraint::Length(hints_w)])
         .split(area);
     f.render_widget(
         Paragraph::new(Span::styled(app.status.clone(), Style::default().fg(theme().fg)))
@@ -923,7 +982,7 @@ fn draw_vars(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(theme().accent))
         .title(Span::styled(
             " variables ",
@@ -954,7 +1013,7 @@ fn draw_vars(f: &mut Frame, app: &App) {
             ("●", Style::default().fg(theme().ok))
         };
         let mark = if sel {
-            Span::styled("▎", Style::default().fg(crate::anim::pulse(app.tick)))
+            Span::styled(app.marker(), Style::default().fg(app.pulse()))
         } else {
             Span::styled(format!("{bullet}"), bstyle)
         };
@@ -1008,7 +1067,7 @@ fn draw_history(f: &mut Frame, app: &App) {
     let matches = app.history_matches();
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(t.accent))
         .title(Span::styled(format!(" history · {place} "), Style::default().fg(t.accent).add_modifier(Modifier::BOLD)))
         .title(Line::from(Span::styled(format!(" {}/{} ", matches.len(), app.history.len()), Style::default().fg(t.dim))).right_aligned())
@@ -1057,7 +1116,7 @@ fn draw_history(f: &mut Frame, app: &App) {
             let e = &app.history[hi];
             let sel = row == app.history_idx;
             let mark = if sel {
-                Span::styled("▎", Style::default().fg(crate::anim::pulse(app.tick)))
+                Span::styled(app.marker(), Style::default().fg(app.pulse()))
             } else {
                 Span::raw(" ")
             };
@@ -1120,7 +1179,7 @@ fn draw_gtfo(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(theme().slate))
         .title(Span::styled(" GTFOBins ", Style::default().fg(theme().fg).add_modifier(Modifier::BOLD)))
         .title(Line::from(Span::styled(" privesc one-liners ", Style::default().fg(theme().dim))).right_aligned())
@@ -1166,7 +1225,7 @@ fn draw_gtfo(f: &mut Frame, app: &App) {
             let g = &GTFOBINS[gi];
             let sel = row == app.gtfo_idx;
             let mark = if sel {
-                Span::styled("▎", Style::default().fg(crate::anim::pulse(app.tick)))
+                Span::styled(app.marker(), Style::default().fg(app.pulse()))
             } else {
                 Span::raw(" ")
             };
@@ -1202,7 +1261,7 @@ fn draw_export(f: &mut Frame, app: &App) {
     let color = if active.is_some() { theme().warn } else { theme().accent };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(color))
         .title(Span::styled(" export writeup ", Style::default().fg(color).add_modifier(Modifier::BOLD)))
         .style(Style::default().bg(theme().panel));
@@ -1247,7 +1306,7 @@ fn draw_flag(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(theme().ok))
         .title(Span::styled(" capture flag ", Style::default().fg(theme().ok).add_modifier(Modifier::BOLD)))
         .style(Style::default().bg(theme().panel));
@@ -1299,7 +1358,7 @@ fn draw_loot(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(theme().accent2))
         .title(Span::styled(" loot ", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD)))
         .title(Line::from(Span::styled(
@@ -1335,7 +1394,7 @@ fn draw_loot(f: &mut Frame, app: &App) {
         .map(|(i, c)| {
             let sel = i == app.loot_idx;
             let mark = if sel {
-                Span::styled("▎", Style::default().fg(crate::anim::pulse(app.tick)))
+                Span::styled(app.marker(), Style::default().fg(app.pulse()))
             } else {
                 Span::raw(" ")
             };
@@ -1401,7 +1460,7 @@ fn draw_htb(f: &mut Frame, app: &App) {
     let htb_green = theme().htb;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(htb_green))
         .title(Span::styled(" hack the box ", Style::default().fg(htb_green).add_modifier(Modifier::BOLD)))
         .title(Line::from(status).right_aligned())
@@ -1489,7 +1548,7 @@ fn draw_htb(f: &mut Frame, app: &App) {
                     TaskKind::Task => ("○", theme().accent),
                 }
             };
-            let mark = if sel { Span::styled("▎", Style::default().fg(crate::anim::pulse(app.tick))) } else { Span::raw(" ") };
+            let mark = if sel { Span::styled(app.marker(), Style::default().fg(app.pulse())) } else { Span::raw(" ") };
             ListItem::new(Line::from(vec![
                 mark,
                 Span::styled(format!(" {icon} "), Style::default().fg(col)),
@@ -1546,7 +1605,7 @@ fn draw_htb_input(f: &mut Frame, app: &App, area: Rect) {
         Some(HtbInput::Answer(b)) => ("answer › ", b),
         None => return,
     };
-    let cursor = if app.tick / 10 % 2 == 0 { "▌" } else { " " };
+    let cursor = if app.anim_tick() / 10 % 2 == 0 { "▌" } else { " " };
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(format!(" {label}"), Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)),
@@ -1564,7 +1623,7 @@ fn draw_recipes(f: &mut Frame, app: &App) {
     let ports = app.vars.get("PORTS").cloned().unwrap_or_default();
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(theme().accent))
         .title(Span::styled(" recipes ", Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)))
         .title(Line::from(Span::styled(
@@ -1592,7 +1651,7 @@ fn draw_recipes(f: &mut Frame, app: &App) {
                 ("○", theme().dim)
             };
             let mark = if sel {
-                Span::styled("▎", Style::default().fg(crate::anim::pulse(app.tick)))
+                Span::styled(app.marker(), Style::default().fg(app.pulse()))
             } else {
                 Span::raw(" ")
             };
@@ -1674,7 +1733,7 @@ fn draw_addloot(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(theme().accent2))
         .title(Span::styled(" add loot ", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD)))
         .style(Style::default().bg(theme().panel));
@@ -1684,10 +1743,10 @@ fn draw_addloot(f: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3); 4])
         .split(inner);
-    draw_field(f, rows[0], "user", &app.loot_form.user, app.loot_form.field == 0);
-    draw_field(f, rows[1], "pass", &app.loot_form.pass, app.loot_form.field == 1);
-    draw_field(f, rows[2], "hash", &app.loot_form.hash, app.loot_form.field == 2);
-    draw_field(f, rows[3], "note", &app.loot_form.note, app.loot_form.field == 3);
+    draw_field(f, app, rows[0], "user", &app.loot_form.user, app.loot_form.field == 0);
+    draw_field(f, app, rows[1], "pass", &app.loot_form.pass, app.loot_form.field == 1);
+    draw_field(f, app, rows[2], "hash", &app.loot_form.hash, app.loot_form.field == 2);
+    draw_field(f, app, rows[3], "note", &app.loot_form.note, app.loot_form.field == 3);
 }
 
 fn draw_rooms(f: &mut Frame, app: &App) {
@@ -1695,7 +1754,7 @@ fn draw_rooms(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(theme().accent2))
         .title(Span::styled(" ctf rooms ", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD)))
         .title(Line::from(Span::styled(
@@ -1737,7 +1796,7 @@ fn draw_rooms(f: &mut Frame, app: &App) {
             let sel = i == app.room_idx;
             let is_active = app.active_room.as_ref().map(|a| a.path == r.path).unwrap_or(false);
             let mark = if sel {
-                Span::styled("▎", Style::default().fg(crate::anim::pulse(app.tick)))
+                Span::styled(app.marker(), Style::default().fg(app.pulse()))
             } else {
                 Span::raw(" ")
             };
@@ -1767,7 +1826,7 @@ fn draw_rooms(f: &mut Frame, app: &App) {
     state.select(Some(app.room_idx));
     f.render_stateful_widget(
         List::new(items)
-            .block(bare_block(theme().border).title(Span::styled(" rooms ", Style::default().fg(theme().dim))))
+            .block(box_block(app, theme().border).title(Span::styled(" rooms ", Style::default().fg(theme().dim))))
             .highlight_style(Style::default().bg(theme().sel_bg)),
         cols[0],
         &mut state,
@@ -1799,7 +1858,7 @@ fn draw_rooms(f: &mut Frame, app: &App) {
     }
     f.render_widget(
         Paragraph::new(lines)
-            .block(bare_block(theme().border).title(Span::styled(" preview ", Style::default().fg(theme().dim))))
+            .block(box_block(app, theme().border).title(Span::styled(" preview ", Style::default().fg(theme().dim))))
             .wrap(Wrap { trim: true }),
         cols[1],
     );
@@ -1810,7 +1869,7 @@ fn draw_newroom(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(theme().accent2))
         .title(Span::styled(" new room ", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD)))
         .style(Style::default().bg(theme().panel));
@@ -1821,9 +1880,9 @@ fn draw_newroom(f: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Length(3), Constraint::Length(3), Constraint::Min(1)])
         .split(inner);
-    draw_field(f, rows[0], "name", &app.new_room.name, app.new_room.field == 0);
-    draw_field(f, rows[1], "target ip (optional)", &app.new_room.ip, app.new_room.field == 1);
-    draw_field(f, rows[2], "hostname (optional)", &app.new_room.host, app.new_room.field == 2);
+    draw_field(f, app, rows[0], "name", &app.new_room.name, app.new_room.field == 0);
+    draw_field(f, app, rows[1], "target ip (optional)", &app.new_room.ip, app.new_room.field == 1);
+    draw_field(f, app, rows[2], "hostname (optional)", &app.new_room.host, app.new_room.field == 2);
     f.render_widget(
         Paragraph::new(Span::styled(
             format!("scaffolds {}/<name> with nmap/ loot/ exploits/ + notes.md", app.paths.rooms_dir.display()),
@@ -1842,7 +1901,7 @@ fn draw_confirm_quit(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(theme().warn))
         .title(Span::styled(" quit ", Style::default().fg(theme().warn).add_modifier(Modifier::BOLD)))
         .style(Style::default().bg(theme().panel));
@@ -1870,7 +1929,7 @@ fn draw_scope_prompt(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(t.warn))
         .title(Span::styled(" ⊙ out of scope ", Style::default().fg(t.warn).add_modifier(Modifier::BOLD)))
         .style(Style::default().bg(t.panel));
@@ -1906,7 +1965,7 @@ fn draw_scope(f: &mut Frame, app: &App) {
     let sc = app.scope_edit_scope();
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(t.accent2))
         .title(Span::styled(format!(" ⊙ scope · {name} "), Style::default().fg(t.accent2).add_modifier(Modifier::BOLD)))
         .title(Line::from(Span::styled(format!(" mode: {} ", app.scope_mode.as_str()), Style::default().fg(t.dim))).right_aligned())
@@ -1953,7 +2012,7 @@ fn draw_scope(f: &mut Frame, app: &App) {
                 };
                 ListItem::new(Line::from(vec![
                     if sel {
-                        Span::styled(" ▎", Style::default().fg(crate::anim::pulse(app.tick)))
+                        Span::styled(format!(" {}", app.marker()), Style::default().fg(app.pulse()))
                     } else {
                         Span::raw("  ")
                     },
@@ -1972,7 +2031,7 @@ fn draw_scope(f: &mut Frame, app: &App) {
     let input = app.scope_edit.input.as_ref();
     let field = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(if input.is_some() { t.border_hi } else { t.border }))
         .title(Span::styled(" add ", Style::default().fg(t.dim)));
     let content = match input {
@@ -1998,7 +2057,7 @@ fn draw_note(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(theme().accent))
         .title(Span::styled(" writeup note ", Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)))
         .style(Style::default().bg(theme().panel));
@@ -2020,7 +2079,7 @@ fn draw_add(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(theme().accent2))
         .title(Span::styled(
             " add command ",
@@ -2042,10 +2101,10 @@ fn draw_add(f: &mut Frame, app: &App) {
         .split(inner);
 
     let field = app.add.field_kind();
-    draw_field(f, rows[0], "category", &app.add.category, field == AddField::Category);
-    draw_field(f, rows[1], "name", &app.add.name, field == AddField::Name);
-    draw_field(f, rows[2], "description", &app.add.description, field == AddField::Description);
-    draw_field(f, rows[3], "template", &app.add.template, field == AddField::Template);
+    draw_field(f, app, rows[0], "category", &app.add.category, field == AddField::Category);
+    draw_field(f, app, rows[1], "name", &app.add.name, field == AddField::Name);
+    draw_field(f, app, rows[2], "description", &app.add.description, field == AddField::Description);
+    draw_field(f, app, rows[3], "template", &app.add.template, field == AddField::Template);
 
     let phs = extract_placeholders(&app.add.template);
     let hint = if phs.is_empty() {
@@ -2060,10 +2119,10 @@ fn draw_add(f: &mut Frame, app: &App) {
     );
 }
 
-fn draw_field(f: &mut Frame, area: Rect, label: &str, val: &str, active: bool) {
+fn draw_field(f: &mut Frame, app: &App, area: Rect, label: &str, val: &str, active: bool) {
     let b = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(if active { theme().accent } else { theme().border }))
         .title(Span::styled(
             format!(" {label} "),
@@ -2077,13 +2136,18 @@ fn draw_field(f: &mut Frame, area: Rect, label: &str, val: &str, active: bool) {
 }
 
 fn draw_splash(f: &mut Frame, app: &App, area: Rect) {
-    let frame = app.splash_frame();
+    // animations off: the finished banner, prompt steady
+    let frame = if app.prefs.animations { app.splash_frame() } else { 18 };
     // bold background behind the banner
-    if app.flow_bg {
-        crate::anim::draw_flow_splash(f, area, app.tick, app.mouse);
-    } else {
-        crate::anim::draw_field_splash(f, area, app.tick);
-        crate::anim::draw_shooting_star(f, area, app.tick, 44, true);
+    match app.prefs.background {
+        Background::Flow => crate::anim::draw_flow_splash(f, area, app.bg_tick(), ripple_at(app), &app.fx),
+        Background::Stars => {
+            crate::anim::draw_field_splash(f, area, app.bg_tick(), &app.fx);
+            if app.prefs.animations {
+                crate::anim::draw_shooting_star(f, area, app.tick, 44, true);
+            }
+        }
+        Background::Off => {}
     }
 
     let banner = crate::anim::BANNER;
@@ -2151,9 +2215,9 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect) {
 
     // blinking prompt near the bottom
     if frame >= REVEAL + 3 {
-        let blink_on = (frame / 3) % 2 == 0;
+        let blink_on = !app.prefs.animations || (frame / 3) % 2 == 0;
         if blink_on {
-            let msg = "✦  press any key  ✦";
+            let msg = if app.prefs.splash_hold { "✦  press any key  ✦" } else { "✦  any key skips  ✦" };
             let mw = msg.chars().count() as u16;
             let mx = area.x + (area.width.saturating_sub(mw)) / 2;
             let my = area.y + area.height - 2;
@@ -2175,7 +2239,7 @@ fn draw_theme_picker(f: &mut Frame, app: &App) {
     let t = theme();
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(t.accent))
         .title(Span::styled(" theme ", Style::default().fg(t.accent).add_modifier(Modifier::BOLD)))
         .title(Line::from(Span::styled(format!(" {}/{} ", app.theme_idx + 1, list.len()), Style::default().fg(t.dim))).right_aligned())
@@ -2188,7 +2252,7 @@ fn draw_theme_picker(f: &mut Frame, app: &App) {
         let sel = i == app.theme_idx;
         let custom = !crate::theme::PRESETS.iter().any(|p| std::ptr::eq(p, *th));
         let mut spans = vec![
-            Span::styled(if sel { " ▸ " } else { "   " }, Style::default().fg(crate::anim::pulse(app.tick))),
+            Span::styled(if sel { " ▸ " } else { "   " }, Style::default().fg(app.pulse())),
             Span::styled(
                 format!("{:<18}", th.name),
                 Style::default()
@@ -2224,7 +2288,7 @@ fn draw_help(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(btype(app))
         .border_style(Style::default().fg(theme().accent))
         .title(Span::styled(
             " help ",
@@ -2258,7 +2322,8 @@ fn draw_help(f: &mut Frame, app: &App) {
         row(&l(A::Vars), "edit variables (split: this cmd / all)"),
         row(&l(A::Favorite), "pin ★ favorite (shows ★/⏱ categories)"),
         row(&j(&[A::Bg, A::Theme, A::ThemePicker]), &format!(
-            "background fx · theme / picker: {}",
+            "background {} · theme / picker: {}",
+            app.prefs.background.as_str(),
             theme().name.chars().take(20).collect::<String>()
         )),
         row(&j(&[A::Discord, A::DiscordPrivacy]), &format!(

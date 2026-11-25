@@ -11,6 +11,7 @@ mod loot;
 mod model;
 mod netif;
 mod ping;
+mod prefs;
 mod recipe;
 mod room;
 mod runner;
@@ -39,11 +40,15 @@ use std::time::{Duration, Instant};
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && args[1] == "snap" {
-        snapshot(&args[2], theme_arg(&args).as_deref());
+        snapshot(&args[2], theme_arg(&args).as_deref(), snap_size(&args));
         return Ok(());
     }
     if args.len() >= 2 && args[1] == "keys" {
         print_keys();
+        return Ok(());
+    }
+    if args.len() >= 2 && args[1] == "prefs" {
+        print_prefs();
         return Ok(());
     }
     install_panic_hook();
@@ -85,6 +90,52 @@ fn print_keys() {
     }
 }
 
+/// `pivt prefs`: every `[layout]` / `[look]` option with its effective
+/// value, default and range (config over defaults).
+fn print_prefs() {
+    let cfg = model::load_config();
+    let (p, mut warnings) = prefs::Prefs::load(&cfg.layout, &cfg.look, cfg.flow_bg);
+    warnings.extend(prefs::parse_categories(&cfg.look).1);
+    let mut last = None;
+    for o in prefs::OPTIONS {
+        if last != Some(o.section) {
+            println!("{}[{}]", if last.is_some() { "\n" } else { "" }, o.section.name());
+            last = Some(o.section);
+        }
+        let range = match &o.kind {
+            prefs::Kind::Bool => "true/false".to_string(),
+            prefs::Kind::Int { min, max, unit } => format!("{min}..{max}{}", if unit.is_empty() { String::new() } else { format!(" {unit}") }),
+            prefs::Kind::Choice(c) => c.join("/"),
+            prefs::Kind::Glyphs { presets, .. } => {
+                format!("{} or chars", presets.iter().map(|p| p.0).collect::<Vec<_>>().join("/"))
+            }
+        };
+        let cur = p.get(o.key).map(|v| v.to_string()).unwrap_or_default();
+        let def = o.default_val().to_string();
+        let mark = if cur == def { " " } else { "*" };
+        println!("{mark}{:<17} {:<10} default {:<8} {:<36} {}", o.key, cur, def, range, o.desc);
+    }
+    for w in warnings {
+        eprintln!("warning: {w}");
+    }
+}
+
+/// `--size WxH` / `$PIVT_SNAP_SIZE` for `pivt snap` (default 110x32).
+fn snap_size(args: &[String]) -> (u16, u16) {
+    let parse = |v: &str| {
+        let (w, h) = v.split_once(['x', 'X'])?;
+        Some((w.trim().parse::<u16>().ok()?.clamp(1, 500), h.trim().parse::<u16>().ok()?.clamp(1, 300)))
+    };
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let v = if a == "--size" { it.next().map(String::as_str) } else { a.strip_prefix("--size=") };
+        if let Some(sz) = v.and_then(parse) {
+            return sz;
+        }
+    }
+    std::env::var("PIVT_SNAP_SIZE").ok().and_then(|v| parse(&v)).unwrap_or((110, 32))
+}
+
 /// `--theme <name>` / `--theme=<name>`, else `$PIVT_THEME`: a theme for this
 /// run only (not saved).
 fn theme_arg(args: &[String]) -> Option<String> {
@@ -103,7 +154,7 @@ fn theme_arg(args: &[String]) -> Option<String> {
 /// Headless render for development/screenshots: `pivt snap splash:8` or `pivt snap normal`.
 /// Never loads or saves the persistent session, so screenshots stay clean.
 /// `theme`: `--theme <name>` or `$PIVT_THEME`, e.g. `pivt snap normal --theme nord`.
-fn snapshot(what: &str, theme: Option<&str>) {
+fn snapshot(what: &str, theme: Option<&str>, (width, height): (u16, u16)) {
     use ratatui::backend::TestBackend;
     // no Discord / ping threads: a snapshot must exit right away
     let mut app = App::headless();
@@ -175,12 +226,12 @@ fn snapshot(what: &str, theme: Option<&str>) {
         }
         "flow" => {
             app.mode = Mode::Normal;
-            app.flow_bg = true;
+            app.prefs.background = prefs::Background::Flow;
             app.tick = 120;
             app.mouse = Some((70, 18));
         }
         "flowsplash" => {
-            app.flow_bg = true;
+            app.prefs.background = prefs::Background::Flow;
             app.tick = 22;
             app.splash_start = 0;
         }
@@ -337,7 +388,7 @@ fn snapshot(what: &str, theme: Option<&str>) {
         }
         _ => app.mode = Mode::Normal,
     }
-    let backend = TestBackend::new(110, 32);
+    let backend = TestBackend::new(width, height);
     let mut term = Terminal::new(backend).unwrap();
     term.draw(|f| ui::draw(f, &app)).unwrap();
     let buf = term.backend().buffer();
@@ -478,11 +529,13 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::
     let tick_rate = Duration::from_millis(50); // ~20 fps
     let mut last_tick = Instant::now();
     let mut mouse_on = false;
+    let mut dirty = true;
+    let mut last_sig = 0u64;
     loop {
         // Capture the mouse for flow-field ripples and for scroll-wheel over the
         // run pane (so you can scroll output even while typing into it). Off
         // otherwise, so normal terminal text selection still works.
-        let want_mouse = app.flow_bg || app.show_run;
+        let want_mouse = (app.prefs.background == prefs::Background::Flow && app.prefs.ripple) || app.show_run;
         if want_mouse != mouse_on {
             if want_mouse {
                 let _ = execute!(terminal.backend_mut(), EnableMouseCapture);
@@ -492,13 +545,18 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::
             }
             mouse_on = want_mouse;
         }
-        terminal.draw(|f| ui::draw(f, app))?;
+        // Animations on: every tick is a new frame. Off: redraw only after
+        // input or when something visible changed (job output, ping, clock).
+        if dirty || app.prefs.animations {
+            terminal.draw(|f| ui::draw(f, app))?;
+            dirty = false;
+        }
         if app.should_quit {
             return Ok(());
         }
-        // Starfield animates continuously, so always pace to the tick rate.
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)? {
+            dirty = true;
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(app, key),
                 Event::Paste(text) => handle_paste(app, &text),
@@ -515,14 +573,23 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".into());
             run_external(terminal, &editor, &path, mouse_on)?;
             last_tick = Instant::now();
+            dirty = true;
         }
         if let Some(path) = app.pending_pager.take() {
             run_external(terminal, &pager(), &path, mouse_on)?;
             last_tick = Instant::now();
+            dirty = true;
         }
         if last_tick.elapsed() >= tick_rate {
             app.on_tick();
             last_tick = Instant::now();
+            if !app.prefs.animations {
+                let sig = app.idle_signature();
+                if sig != last_sig {
+                    last_sig = sig;
+                    dirty = true;
+                }
+            }
         }
     }
 }
@@ -1047,7 +1114,13 @@ fn dispatch(app: &mut App, a: Action) {
 }
 
 fn cycle_focus(app: &mut App, forward: bool) {
-    let mut order = vec![Focus::Categories, Focus::Commands, Focus::Preview];
+    let mut order = vec![Focus::Commands];
+    if app.prefs.show_categories {
+        order.insert(0, Focus::Categories);
+    }
+    if app.prefs.show_preview {
+        order.push(Focus::Preview);
+    }
     if app.show_run {
         order.push(Focus::Run);
     }
@@ -1395,5 +1468,184 @@ mod tests {
         assert!(run.contains("Z zoom") && run.contains("alt-k kill"), "{run}");
         app.interacting = true;
         assert!(render(&app).contains("F10 detach"));
+    }
+
+    /// App with `[layout]` / `[look]` from TOML (no user files involved).
+    fn prefd(layout: &str, look: &str) -> App {
+        let mut app = App::for_tests();
+        set_prefs(&mut app, layout, look);
+        app
+    }
+
+    fn set_prefs(app: &mut App, layout: &str, look: &str) {
+        app.mode = Mode::Normal;
+        let (p, w) = prefs::Prefs::load(&toml::from_str(layout).unwrap(), &toml::from_str(look).unwrap(), false);
+        assert!(w.is_empty(), "{w:?}");
+        app.prefs = p;
+        app.apply_prefs();
+    }
+
+    fn buffer(app: &App, w: u16, h: u16) -> ratatui::buffer::Buffer {
+        use ratatui::backend::TestBackend;
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| ui::draw(f, app)).unwrap();
+        term.backend().buffer().clone()
+    }
+
+    fn text(b: &ratatui::buffer::Buffer) -> String {
+        let mut out = String::new();
+        for y in 0..b.area.height {
+            for x in 0..b.area.width {
+                out.push_str(b.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    const SIZES: &[(u16, u16)] = &[(200, 60), (110, 32), (80, 24), (60, 16), (30, 10), (12, 5), (1, 1)];
+
+    #[test]
+    fn every_border_charset_and_layout_renders() {
+        let mut layouts = vec![String::new(), "compact = true".into()];
+        layouts.push("show_categories = false\nshow_preview = false".into());
+        layouts.push("show_logo = false\nshow_search = false\nshow_target = false\nshow_hints = false".into());
+        layouts.push("categories_width = 40\ncommands_width = 80\nrun_height = 85\nshow_ping = false\nshow_timer = false\nshow_scope = false\nshow_lhost = false".into());
+        let mut looks: Vec<String> = prefs::Border::NAMES.iter().map(|b| format!("border = \"{b}\"")).collect();
+        for (c, _) in prefs::FLOW_PRESETS {
+            looks.push(format!("background = \"flow\"\nflow_charset = \"{c}\"\nbg_density = 10"));
+        }
+        looks.push("background = \"flow\"\nflow_charset = \"#*\"\nbg_density = 1\nbg_slowdown = 10".into());
+        for (g, _) in prefs::STAR_PRESETS {
+            looks.push(format!("star_glyphs = \"{g}\"\nmarker = \"chevron\""));
+        }
+        looks.push("star_glyphs = \"o\"\nmarker = \"»\"\nanimations = false".into());
+        looks.push("background = \"off\"\nborder = \"double\"".into());
+        let mut app = App::for_tests();
+        for (li, layout) in layouts.iter().enumerate() {
+            for look in &looks {
+                set_prefs(&mut app, layout, look);
+                app.mouse = Some((5, 5));
+                app.vars.insert("RHOST".into(), "10.10.11.42".into());
+                for &(w, h) in SIZES {
+                    buffer(&app, w, h);
+                }
+                // overlays, splash and the help popup on top
+                if li < 2 {
+                    for mode in [Mode::Help, Mode::Splash, Mode::Vars, Mode::Theme] {
+                        app.mode = mode;
+                        for (w, h) in [(80, 24), (30, 10)] {
+                            buffer(&app, w, h);
+                        }
+                    }
+                }
+                app.mode = Mode::Normal;
+                app.burst_start = Some(app.tick);
+                buffer(&app, 80, 24);
+                app.burst_start = None;
+            }
+        }
+    }
+
+    #[test]
+    fn layout_snapshots_at_80x24_and_200x60() {
+        // defaults: three bordered panes + 3-row header
+        let t = text(&buffer(&prefd("", ""), 80, 24));
+        let rows: Vec<&str> = t.lines().collect();
+        assert!(rows[0].starts_with('╭') && rows[3].contains("categories") && rows[3].contains("preview"), "{t}");
+        // compact: one-line header, no box drawing in the panes
+        let app = prefd("compact = true", "");
+        let t = text(&buffer(&app, 80, 24));
+        let rows: Vec<&str> = t.lines().collect();
+        assert!(rows[0].contains("pivt") && rows[0].contains("search"), "{t}");
+        assert!(rows[1].contains("categories") && rows[1].contains("commands"), "{t}");
+        assert!(!t.contains('│') && !t.contains('╭'), "{t}");
+        // hidden panes: no categories / preview titles; the space goes to commands
+        let t = text(&buffer(&prefd("show_categories = false\nshow_preview = false", ""), 200, 60));
+        assert!(!t.contains("categories") && !t.contains("preview"), "{t}");
+        assert!(t.lines().nth(3).unwrap().starts_with("╭ commands"), "{t}");
+        // header items off: no logo, no target box
+        let t = text(&buffer(&prefd("show_logo = false\nshow_target = false", ""), 200, 60));
+        assert!(!t.contains("pivt") && !t.contains("target") && t.contains("search commands"), "{t}");
+        let t = text(&buffer(&prefd("show_lhost = false\nshow_ping = false", ""), 110, 32));
+        assert!(!t.contains('⇡') && !t.contains('○'), "{t}");
+        // every border style draws its own corners
+        for (b, corner) in [("rounded", '╭'), ("plain", '┌'), ("double", '╔'), ("thick", '┏')] {
+            let t = text(&buffer(&prefd("", &format!("border = \"{b}\"")), 80, 24));
+            assert!(t.starts_with(corner), "{b}: {t}");
+        }
+        // marker + category override
+        let t = text(&buffer(&prefd("", "marker = \"arrow\""), 80, 24));
+        assert!(t.contains("▸⌖ nmap"), "{t}");
+        // hints off: no key hints in the footer, status still there
+        let app = prefd("show_hints = false", "");
+        let t = text(&buffer(&app, 110, 32));
+        assert!(t.lines().last().unwrap().contains("ready") && !t.contains("x run"), "{t}");
+    }
+
+    #[test]
+    fn animations_off_frames_are_stable() {
+        for bg in ["stars", "flow", "off"] {
+            let look = format!("animations = false\nbackground = \"{bg}\"");
+            let mut app = prefd("", &look);
+            app.vars.insert("RHOST".into(), String::new());
+            app.on_tick();
+            for (w, h) in [(80, 24), (200, 60)] {
+                let a = buffer(&app, w, h);
+                let sig = app.idle_signature();
+                app.on_tick();
+                let b = buffer(&app, w, h);
+                assert_eq!(a, b, "{bg}: frame changed between ticks");
+                // nothing changed → the event loop would skip the redraw
+                assert_eq!(sig, app.idle_signature(), "{bg}");
+            }
+            // the splash is static too
+            app.mode = Mode::Splash;
+            let a = buffer(&app, 110, 32);
+            app.on_tick();
+            assert_eq!(a, buffer(&app, 110, 32), "{bg} splash");
+        }
+        // sanity: with animations on the starfield does move
+        let mut app = prefd("", "");
+        app.tick = 100;
+        let a = buffer(&app, 110, 32);
+        for _ in 0..8 {
+            app.on_tick();
+        }
+        assert_ne!(a, buffer(&app, 110, 32));
+    }
+
+    #[test]
+    fn hidden_panes_leave_the_focus_cycle() {
+        let mut app = prefd("show_categories = false\nshow_preview = false", "");
+        assert!(app.focus == Focus::Commands);
+        cycle_focus(&mut app, true);
+        assert!(app.focus == Focus::Commands);
+        let mut app = prefd("show_preview = false", "");
+        app.focus = Focus::Categories;
+        cycle_focus(&mut app, true);
+        cycle_focus(&mut app, true);
+        assert!(app.focus == Focus::Categories, "categories ↔ commands only");
+    }
+
+    #[test]
+    fn splash_auto_continue() {
+        let mut app = prefd("", "splash_hold = false\nsplash_seconds = 2");
+        app.mode = Mode::Splash;
+        app.splash_start = 0;
+        app.tick = 0;
+        for _ in 0..39 {
+            app.on_tick();
+        }
+        assert!(app.mode == Mode::Splash);
+        app.on_tick();
+        assert!(app.mode == Mode::Normal, "2 s = 40 ticks");
+        // hold (default) never times out
+        let mut app = prefd("", "");
+        app.mode = Mode::Splash;
+        for _ in 0..400 {
+            app.on_tick();
+        }
+        assert!(app.mode == Mode::Splash);
     }
 }

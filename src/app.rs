@@ -178,6 +178,8 @@ const SESSION_CHECK_TICKS: u64 = 40;
 const SESSION_FULL_TICKS: u64 = 600;
 /// Ticks between checks that LHOST is still a local address (~10s).
 const LHOST_CHECK_TICKS: u64 = 200;
+/// The event loop ticks at ~20 fps.
+const TICKS_PER_SEC: u64 = 20;
 
 /// A hashcat run started from the loot view, waiting for its tab to exit.
 pub struct PendingCrack {
@@ -310,8 +312,14 @@ pub struct App {
     pub gtfo_query: String,
     pub gtfo_idx: usize,
 
-    // background effect
-    pub flow_bg: bool,
+    /// `[layout]` + `[look]` options (see [`crate::prefs`]).
+    pub prefs: crate::prefs::Prefs,
+    /// Background settings resolved from `prefs`, for `anim`.
+    pub fx: crate::anim::Fx,
+    /// `[layout]` / `[look]` as written in config.toml, written back as-is
+    /// (plus anything changed in-app), so defaults never get dumped there.
+    layout_cfg: toml::Table,
+    look_cfg: toml::Table,
 
     /// Theme name as saved in config.toml (kept even if that theme is missing).
     theme_cfg: String,
@@ -415,7 +423,12 @@ pub struct App {
 }
 
 /// The first status line: key warnings, then the LHOST note, else "ready".
-fn startup_status(lhost_note: Option<String>, key_warnings: &[String], keys: &crate::keys::Keymap) -> String {
+fn startup_status(
+    lhost_note: Option<String>,
+    key_warnings: &[String],
+    pref_warnings: &[String],
+    keys: &crate::keys::Keymap,
+) -> String {
     use crate::keys::Action;
     let mut parts = Vec::new();
     if !key_warnings.is_empty() {
@@ -424,6 +437,14 @@ fn startup_status(lhost_note: Option<String>, key_warnings: &[String], keys: &cr
             "⚠ [keys] {n} problem{} (`pivt keys` lists them): {}",
             if n == 1 { "" } else { "s" },
             key_warnings.join(" · ")
+        ));
+    }
+    if !pref_warnings.is_empty() {
+        let n = pref_warnings.len();
+        parts.push(format!(
+            "⚠ [layout]/[look] {n} problem{} (defaults used): {}",
+            if n == 1 { "" } else { "s" },
+            pref_warnings.join(" · ")
         ));
     }
     if let Some(n) = lhost_note {
@@ -479,8 +500,15 @@ impl App {
     fn build(commands: Vec<Command>, cfg: Config, background: bool) -> Self {
         let favorites = cfg.favorites.clone();
         let recent = cfg.recent.clone();
-        let flow_bg = cfg.flow_bg;
         let (keys, key_warnings) = crate::keys::Keymap::from_config(&cfg.keys);
+        let (prefs, mut pref_warnings) = crate::prefs::Prefs::load(&cfg.layout, &cfg.look, cfg.flow_bg);
+        let (cat_styles, cat_warnings) = crate::prefs::parse_categories(&cfg.look);
+        pref_warnings.extend(cat_warnings);
+        // global like the theme; left alone when empty so parallel tests
+        // building default apps don't clobber each other
+        if !cat_styles.is_empty() {
+            crate::theme::set_category_overrides(cat_styles);
+        }
         crate::theme::set(crate::theme::resolve(&cfg.theme));
         let paths = Paths::from_config(&cfg);
         let path_cfg = (cfg.rooms_dir.clone(), cfg.room_template.clone(), cfg.sync_target_file.clone());
@@ -567,7 +595,8 @@ impl App {
             loot::load(&loot::loot_path(active_room.as_ref(), &target))
         };
 
-        let skip_splash = std::env::var("PIVT_NO_SPLASH").is_ok()
+        let skip_splash = !prefs.splash
+            || std::env::var("PIVT_NO_SPLASH").is_ok()
             || std::env::args().any(|a| a == "--no-splash");
         let categories = derive_categories(&commands);
         let mut app = App {
@@ -576,10 +605,10 @@ impl App {
             categories,
             cat_idx: 0,
             cmd_idx: 0,
-            focus: Focus::Categories,
+            focus: if prefs.show_categories { Focus::Categories } else { Focus::Commands },
             mode: if skip_splash { Mode::Normal } else { Mode::Splash },
             search: String::new(),
-            status: startup_status(lhost_note, &key_warnings, &keys),
+            status: startup_status(lhost_note, &key_warnings, &pref_warnings, &keys),
             should_quit: false,
             confirm_quit: false,
             tick: 0,
@@ -626,7 +655,10 @@ impl App {
             burst_label: String::new(),
             gtfo_query: String::new(),
             gtfo_idx: 0,
-            flow_bg,
+            fx: crate::anim::Fx::default(),
+            prefs,
+            layout_cfg: cfg.layout.clone(),
+            look_cfg: cfg.look.clone(),
             theme_cfg: cfg.theme.clone(),
             theme_idx: 0,
             theme_prev: None,
@@ -677,6 +709,7 @@ impl App {
             keys_cfg: cfg.keys.clone(),
             matcher: SkimMatcherV2::default(),
         };
+        app.apply_prefs();
         app.refresh_scope();
         app.refresh_missing();
         app.refresh_categories();
@@ -697,12 +730,101 @@ impl App {
         self.mode = Mode::Normal;
     }
 
+    // ── layout / look prefs ──
+
+    /// Re-derive everything cached from `prefs` (call after changing it).
+    pub fn apply_prefs(&mut self) {
+        let p = &self.prefs;
+        self.fx = crate::anim::Fx {
+            density: p.bg_density,
+            ramp: p.flow_ramp(),
+            stars: p.star_set(),
+            animate: p.animations,
+        };
+        // a hidden pane can't keep the focus
+        if !p.show_categories && self.focus == Focus::Categories {
+            self.focus = Focus::Commands;
+        }
+        if !p.show_preview && self.focus == Focus::Preview {
+            self.focus = Focus::Commands;
+        }
+    }
+
+    /// Change one option by key (validated like the config file) and save it
+    /// in config.toml. For the settings screen and in-app toggles.
+    pub fn set_pref(&mut self, key: &str, v: crate::prefs::Val) -> Result<(), String> {
+        let opt = crate::prefs::Opt::find(key).ok_or_else(|| format!("unknown option '{key}'"))?;
+        let (v, _) = opt.parse(&v.to_toml())?;
+        self.prefs.set(key, v.clone());
+        crate::prefs::Prefs::store(&mut self.layout_cfg, &mut self.look_cfg, key, Some(&v));
+        self.apply_prefs();
+        self.persist_config();
+        Ok(())
+    }
+
+    /// The run pane's inner (rows, cols) for the current terminal and layout.
+    pub fn pane_size(&self, fullscreen: bool) -> (u16, u16) {
+        let (cols, rows) = crossterm::terminal::size().unwrap_or((100, 32));
+        crate::prefs::run_inner(ratatui::layout::Rect::new(0, 0, cols, rows), &self.prefs, fullscreen)
+    }
+
+    /// Tick for animations: frozen at 0 when animations are off.
+    pub fn anim_tick(&self) -> u64 {
+        if self.prefs.animations {
+            self.tick
+        } else {
+            0
+        }
+    }
+
+    /// Tick for the background effect (slowed by `bg_slowdown`).
+    pub fn bg_tick(&self) -> u64 {
+        self.anim_tick() / self.prefs.bg_slowdown.max(1) as u64
+    }
+
+    /// The selected-row accent: pulsing, or steady with animations off.
+    pub fn pulse(&self) -> ratatui::style::Color {
+        if self.prefs.animations {
+            crate::anim::pulse(self.tick)
+        } else {
+            crate::theme::theme().accent
+        }
+    }
+
+    /// Selected-row marker glyph.
+    pub fn marker(&self) -> String {
+        self.prefs.marker()
+    }
+
+    /// Fingerprint of what can change on screen without a key press (job
+    /// output, ping, the 1 s clock). With animations off the event loop
+    /// only redraws when this changes.
+    pub fn idle_signature(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (self.tick / TICKS_PER_SEC).hash(&mut h);
+        for j in &self.runs {
+            (j.output_seq(), j.exit, j.is_running()).hash(&mut h);
+        }
+        let p = self.ping();
+        (p.up, p.rtt_ms, p.tcp_port).hash(&mut h);
+        self.burst_progress().is_some().hash(&mut h);
+        std::mem::discriminant(&self.mode).hash(&mut h);
+        h.finish()
+    }
+
     /// Advance animation; called once per tick from the event loop.
     /// The splash animates to completion then holds (starfield keeps twinkling)
     /// until the user presses a key.
     pub fn on_tick(&mut self) {
         self.tick += 1;
-        let (rows, cols) = crate::runner::pane_size(self.run_fullscreen);
+        if self.mode == Mode::Splash
+            && !self.prefs.splash_hold
+            && self.splash_frame() >= self.prefs.splash_seconds as u64 * TICKS_PER_SEC
+        {
+            self.end_splash();
+        }
+        let (rows, cols) = self.pane_size(self.run_fullscreen);
         for r in &mut self.runs {
             r.poll();
             r.resize(rows, cols);
@@ -967,10 +1089,17 @@ impl App {
         self.status = s.into();
     }
 
+    /// `b`: stars → flow → off, saved as `[look] background`.
     pub fn toggle_bg(&mut self) {
-        self.flow_bg = !self.flow_bg;
-        self.persist_config();
-        self.set_status(if self.flow_bg { "background: flow field" } else { "background: starfield" });
+        // the same stepping the settings screen uses
+        if let (Some(opt), Some(cur)) = (crate::prefs::Opt::find("background"), self.prefs.get("background")) {
+            let _ = self.set_pref("background", opt.step(&cur, 1));
+        }
+        self.set_status(match self.prefs.background {
+            crate::prefs::Background::Stars => "background: starfield",
+            crate::prefs::Background::Flow => "background: flow field",
+            crate::prefs::Background::Off => "background: off",
+        });
     }
 
     // ── themes ──
@@ -1225,7 +1354,8 @@ impl App {
             vars: self.vars.clone(),
             favorites: self.favorites.clone(),
             recent: self.recent.clone(),
-            flow_bg: self.flow_bg,
+            // legacy switch, kept for older pivt builds
+            flow_bg: self.prefs.background == crate::prefs::Background::Flow,
             hide_missing: self.hide_missing,
             theme: self.theme_cfg.clone(),
             discord_rpc: self.discord_rpc,
@@ -1237,6 +1367,8 @@ impl App {
             sync_target_file: self.path_cfg.2.clone(),
             scope_mode: self.scope_mode_cfg.clone(),
             keys: self.keys_cfg.clone(),
+            layout: self.layout_cfg.clone(),
+            look: self.look_cfg.clone(),
         };
         let _ = save_config(&cfg);
         // keep the shell target file (if enabled) + room .target in sync with RHOST
@@ -1676,7 +1808,7 @@ impl App {
         }
         let steps = cmd.run_steps();
         let multi = steps.len() > 1;
-        let (rows, cols) = crate::runner::pane_size(self.run_fullscreen);
+        let (rows, cols) = self.pane_size(self.run_fullscreen);
         let cwd = self.active_room.as_ref().map(|r| r.path.clone());
         let mut spawned = 0;
         let mut made: Vec<String> = Vec::new();
@@ -2370,7 +2502,7 @@ impl App {
         if let Some(dir) = cwd.clone().or_else(|| std::env::current_dir().ok()) {
             crate::runner::prepare_output_dirs(&cmd, &dir);
         }
-        let (rows, cols) = crate::runner::pane_size(self.run_fullscreen);
+        let (rows, cols) = self.pane_size(self.run_fullscreen);
         let log = self.job_log(&title);
         match RunJob::spawn_logged(title.clone(), cmd.clone(), rows, cols, cwd.as_deref(), log) {
             Ok(new) => {
@@ -2576,7 +2708,7 @@ impl App {
             Some(c) => c.wrap_for_run(&e.cmd),
             None => e.cmd.clone(),
         };
-        let (rows, cols) = crate::runner::pane_size(self.run_fullscreen);
+        let (rows, cols) = self.pane_size(self.run_fullscreen);
         let log = self.job_log(&e.name);
         match RunJob::spawn_logged(e.name.clone(), line, rows, cols, cwd.as_deref(), log) {
             Ok(job) => {
@@ -2669,7 +2801,7 @@ impl App {
         }
         self.clamp();
 
-        let (rows, cols) = crate::runner::pane_size(s.run_fullscreen);
+        let (rows, cols) = self.pane_size(s.run_fullscreen);
         let n = s.tabs.len();
         for t in s.tabs {
             let text = t.output.unwrap_or_default();
@@ -3086,7 +3218,7 @@ impl App {
         };
         let who = if c.user.is_empty() { "hash".to_string() } else { c.user.clone() };
         let title = format!("crack {who} ({})", kind.name);
-        let (rows, cols) = crate::runner::pane_size(self.run_fullscreen);
+        let (rows, cols) = self.pane_size(self.run_fullscreen);
         let cwd = self.active_room.as_ref().map(|r| r.path.clone());
         let log = self.job_log(&title);
         match RunJob::spawn_logged(title.clone(), cmd.clone(), rows, cols, cwd.as_deref(), log) {
@@ -4036,5 +4168,57 @@ mod tests {
         app.open_scope(None);
         assert!(app.mode == Mode::Normal && app.status.contains("no active room"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn set_pref_and_bg_cycle_write_only_their_keys() {
+        use crate::prefs::{Background, Val};
+        let mut app = App::for_tests();
+        assert!(!app.persist, "tests never write the real config");
+        assert!(app.layout_cfg.is_empty() && app.look_cfg.is_empty());
+        app.toggle_bg();
+        assert_eq!(app.prefs.background, Background::Flow);
+        app.toggle_bg();
+        assert_eq!(app.prefs.background, Background::Off);
+        assert_eq!(app.status, "background: off");
+        app.toggle_bg();
+        assert_eq!(app.prefs.background, Background::Stars);
+        assert_eq!(app.look_cfg.len(), 1, "{:?}", app.look_cfg);
+        assert_eq!(app.look_cfg["background"].as_str(), Some("stars"));
+        // validated like the file: clamped, bad shapes refused
+        app.set_pref("categories_width", Val::Int(3)).unwrap();
+        assert_eq!(app.prefs.categories_width, 10);
+        assert_eq!(app.layout_cfg["categories_width"].as_integer(), Some(10));
+        assert!(app.set_pref("border", Val::Str("wavy".into())).is_err());
+        assert!(app.set_pref("compact", Val::Int(1)).is_err());
+        assert!(app.set_pref("nope", Val::Bool(true)).is_err());
+        assert_eq!(app.layout_cfg.len(), 1);
+        // hiding a pane moves the focus off it; caches follow
+        app.focus = Focus::Preview;
+        app.set_pref("show_preview", Val::Bool(false)).unwrap();
+        assert!(app.focus == Focus::Commands);
+        app.set_pref("animations", Val::Bool(false)).unwrap();
+        assert!(!app.fx.animate);
+        assert_eq!(app.anim_tick(), 0);
+        assert_eq!(app.pulse(), crate::theme::theme().accent);
+        app.set_pref("flow_charset", Val::Str("blocks".into())).unwrap();
+        assert_eq!(app.fx.ramp, vec![' ', '░', '▒', '▓', '█']);
+    }
+
+    #[test]
+    fn category_overrides_apply() {
+        use crate::prefs::parse_categories;
+        let look: toml::Table = toml::from_str(
+            "[categories]\nzz-test-a = { glyph = \"Z\", color = \"#102030\" }\nzz-test-b = { color = \"warn\" }",
+        )
+        .unwrap();
+        let (st, w) = parse_categories(&look);
+        assert!(w.is_empty());
+        crate::theme::set_category_overrides(st);
+        assert_eq!(crate::theme::category_style("zz-test-a"), ('Z', ratatui::style::Color::Rgb(0x10, 0x20, 0x30)));
+        // (role colours resolve per theme; other tests switch themes, so only the glyph here)
+        assert_eq!(crate::theme::category_style("zz-test-b").0, '◆', "user category keeps the fallback glyph");
+        crate::theme::set_category_overrides(Vec::new());
+        assert_eq!(crate::theme::category_style("zz-test-a").0, '◆');
     }
 }

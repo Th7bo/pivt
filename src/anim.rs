@@ -11,6 +11,36 @@ fn hash2(x: u16, y: u16) -> u32 {
     h
 }
 
+/// Background settings resolved from `[look]` (see [`crate::prefs`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fx {
+    /// 1 (sparse) ..= 10 (dense); 5 is the original look.
+    pub density: u16,
+    /// Flow ramp, index 0 = blank.
+    pub ramp: Vec<char>,
+    /// Star glyphs dim → bright; `None` = the classic set.
+    pub stars: Option<Vec<char>>,
+    /// Twinkle, drift and shooting stars (off = a still field).
+    pub animate: bool,
+}
+
+impl Default for Fx {
+    fn default() -> Self {
+        Fx { density: 5, ramp: RAMP.chars().collect(), stars: None, animate: true }
+    }
+}
+
+impl Fx {
+    /// Star hash divisor: `base` at density 5, sparser below, denser above.
+    fn star_div(&self, base: u32) -> u32 {
+        (base * 5 / self.density.clamp(1, 10) as u32).max(2)
+    }
+    /// Flow cutoff shifted by density (lower = more cells drawn).
+    fn cutoff(&self, base: f32) -> f32 {
+        (base + (5.0 - self.density.clamp(1, 10) as f32) * 0.04).max(0.0)
+    }
+}
+
 struct FieldCfg {
     density: u32,  // higher = sparser
     bright: bool,  // louder palette (splash)
@@ -19,7 +49,7 @@ struct FieldCfg {
     speed: u64,    // twinkle speed divisor
 }
 
-fn star_at(x: u16, y: u16, tick: u64, cfg: &FieldCfg, pal: (Color, Color, Color, Color)) -> Option<(char, Color)> {
+fn star_at(x: u16, y: u16, tick: u64, cfg: &FieldCfg, pal: (Color, Color, Color, Color), set: Option<&[char]>) -> Option<(char, Color)> {
     // vertical drift: sample the field a bit lower each tick
     let yv = if cfg.drift_div > 0 {
         (y as i64 + tick as i64 / cfg.drift_div) as u16
@@ -36,6 +66,22 @@ fn star_at(x: u16, y: u16, tick: u64, cfg: &FieldCfg, pal: (Color, Color, Color,
     let step = ((tick / cfg.speed) as u32 + phase) % 8;
 
     let (faint, mid, hi, pop) = pal;
+
+    // user glyph set: levels dim → bright, the last one is the twinkle peak
+    if let Some(g) = set.filter(|g| !g.is_empty()) {
+        let n = g.len();
+        let at = |k: usize| g[(k * (n - 1) + 2) / 4]; // k in 0..=4 → index
+        if !twinkler {
+            return Some(if h % 3 == 2 { (at(1), mid) } else { (g[0], faint) });
+        }
+        return Some(match step {
+            0 | 7 => (at(0), faint),
+            1 | 6 => (at(1), mid),
+            2 | 5 => (at(2), mid),
+            3 => (at(3), hi),
+            _ => (at(4), pop),
+        });
+    }
 
     if !twinkler {
         let (g, c) = match h % 3 {
@@ -55,7 +101,7 @@ fn star_at(x: u16, y: u16, tick: u64, cfg: &FieldCfg, pal: (Color, Color, Color,
     Some((g, c))
 }
 
-fn paint(f: &mut Frame, area: Rect, tick: u64, cfg: &FieldCfg) {
+fn paint(f: &mut Frame, area: Rect, tick: u64, cfg: &FieldCfg, set: Option<&[char]>) {
     let t = theme();
     let pal = if cfg.bright {
         (t.star_dim, t.star_mid, t.star_hi, t.accent)
@@ -67,7 +113,7 @@ fn paint(f: &mut Frame, area: Rect, tick: u64, cfg: &FieldCfg) {
     let buf = f.buffer_mut();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
-            if let Some((g, c)) = star_at(x, y, tick, cfg, pal) {
+            if let Some((g, c)) = star_at(x, y, tick, cfg, pal, set) {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_char(g).set_fg(c);
                 }
@@ -77,13 +123,14 @@ fn paint(f: &mut Frame, area: Rect, tick: u64, cfg: &FieldCfg) {
 }
 
 /// Calm, slowly-drifting starfield behind the live UI.
-pub fn draw_field_app(f: &mut Frame, area: Rect, tick: u64) {
-    paint(f, area, tick, &FieldCfg { density: 42, bright: false, calm: true, drift_div: 16, speed: 9 });
+pub fn draw_field_app(f: &mut Frame, area: Rect, tick: u64, fx: &Fx) {
+    let drift_div = if fx.animate { 16 } else { 0 };
+    paint(f, area, tick, &FieldCfg { density: fx.star_div(42), bright: false, calm: true, drift_div, speed: 9 }, fx.stars.as_deref());
 }
 
 /// Loud, twinkly starfield for the splash.
-pub fn draw_field_splash(f: &mut Frame, area: Rect, tick: u64) {
-    paint(f, area, tick, &FieldCfg { density: 7, bright: true, calm: false, drift_div: 0, speed: 4 });
+pub fn draw_field_splash(f: &mut Frame, area: Rect, tick: u64, fx: &Fx) {
+    paint(f, area, tick, &FieldCfg { density: fx.star_div(7), bright: true, calm: false, drift_div: 0, speed: 4 }, fx.stars.as_deref());
 }
 
 /// A shooting star that streaks across. `period`: ticks between streaks.
@@ -119,7 +166,7 @@ pub fn draw_shooting_star(f: &mut Frame, area: Rect, tick: u64, period: u64, bri
 
 // ───────────────────────── flow field (noise ASCII) ─────────────────────────
 
-const RAMP: &[u8] = b" .,:;-=+*x#%@";
+const RAMP: &str = " .,:;-=+*x#%@";
 
 fn smooth(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
@@ -159,7 +206,8 @@ fn fbm(x: f32, y: f32) -> f32 {
     v
 }
 
-struct FlowCfg {
+struct FlowCfg<'a> {
+    ramp: &'a [char],
     peak: f32,    // brightness ceiling (0..1) — subtle vs bold
     gain: f32,    // contrast
     cutoff: f32,  // below this the cell stays blank (higher = sparser)
@@ -181,6 +229,7 @@ fn blend(a: Color, b: Color, t: f32) -> Color {
 
 /// Flowing ASCII noise field. `mouse` (cell coords) adds a ripple.
 fn flow(f: &mut Frame, area: Rect, tick: u64, mouse: Option<(u16, u16)>, cfg: &FlowCfg) {
+    let ramp = if cfg.ramp.len() >= 2 { cfg.ramp } else { &[' ', '.', '*'] };
     let t = tick as f32 * 0.05;
     // char cells are ~2:1 tall, compensate so the flow looks round
     let aspect = 0.5f32;
@@ -207,8 +256,8 @@ fn flow(f: &mut Frame, area: Rect, tick: u64, mouse: Option<(u16, u16)>, cfg: &F
             if v < cfg.cutoff {
                 continue; // leave empty cells blank
             }
-            let ri = ((v * (RAMP.len() as f32 - 1.0)) as usize).clamp(1, RAMP.len() - 1);
-            let glyph = RAMP[ri] as char;
+            let ri = ((v * (ramp.len() as f32 - 1.0)) as usize).clamp(1, ramp.len() - 1);
+            let glyph = ramp[ri];
             let ci = (v * 3.999) as usize;
             let color = cfg.colors[ci.min(3)];
             if let Some(cell) = buf.cell_mut((x, y)) {
@@ -219,11 +268,12 @@ fn flow(f: &mut Frame, area: Rect, tick: u64, mouse: Option<(u16, u16)>, cfg: &F
 }
 
 /// Subtle flow behind the live UI, tinted toward `tint` (selected category hue).
-pub fn draw_flow_app(f: &mut Frame, area: Rect, tick: u64, mouse: Option<(u16, u16)>, tint: Color) {
+pub fn draw_flow_app(f: &mut Frame, area: Rect, tick: u64, mouse: Option<(u16, u16)>, tint: Color, fx: &Fx) {
     flow(f, area, tick, mouse, &FlowCfg {
+        ramp: &fx.ramp,
         peak: 0.5,
         gain: 1.5,
-        cutoff: 0.2,
+        cutoff: fx.cutoff(0.2),
         colors: [
             blend(theme().star_faint, tint, 0.18),
             blend(theme().star_dim, tint, 0.22),
@@ -234,11 +284,12 @@ pub fn draw_flow_app(f: &mut Frame, area: Rect, tick: u64, mouse: Option<(u16, u
 }
 
 /// Bold flow for the splash.
-pub fn draw_flow_splash(f: &mut Frame, area: Rect, tick: u64, mouse: Option<(u16, u16)>) {
+pub fn draw_flow_splash(f: &mut Frame, area: Rect, tick: u64, mouse: Option<(u16, u16)>, fx: &Fx) {
     flow(f, area, tick, mouse, &FlowCfg {
+        ramp: &fx.ramp,
         peak: 1.0,
         gain: 1.8,
-        cutoff: 0.05,
+        cutoff: fx.cutoff(0.05),
         colors: [theme().star_dim, theme().star_mid, theme().star_hi, theme().accent],
     });
 }

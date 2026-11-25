@@ -77,7 +77,7 @@ actions! {
     Notes => "notes", Normal, ["o"], "open room notes in $EDITOR";
     Loot => "loot", Normal, ["L"], "loot / creds";
     Favorite => "favorite", Normal, ["f"], "pin / unpin favorite";
-    Bg => "bg", Normal, ["b"], "background effect";
+    Bg => "bg", Normal, ["b"], "cycle background: stars / flow / off";
     Theme => "theme", Normal, ["t"], "next theme";
     ThemePicker => "theme_picker", Normal, ["T"], "theme picker";
     Discord => "discord", Normal, ["D"], "Discord presence on / off";
