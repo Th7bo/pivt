@@ -111,6 +111,11 @@ pub struct Config {
     /// Background style: true = flowing ASCII field, false = starfield.
     #[serde(default)]
     pub flow_bg: bool,
+    /// Colour theme by name (a preset or a file in ~/.config/pivt/themes/).
+    /// A string so an unknown name falls back to the default instead of
+    /// failing the parse; empty = default.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub theme: String,
     /// Enable Discord Rich Presence (opt-in).
     #[serde(default)]
     pub discord_rpc: bool,
@@ -696,6 +701,22 @@ mod tests {
         let back: Config = toml::from_str(&txt).unwrap();
         assert_eq!(back.favorites, vec!["nmap/Quick".to_string()]);
         assert_eq!(back.vars.get("RHOST").unwrap(), "10.0.0.1");
+    }
+
+    #[test]
+    fn config_theme_string_never_breaks_parse() {
+        let mut c = Config::default();
+        c.theme = "tokyo night".into();
+        c.vars.insert("RHOST".into(), "10.0.0.1".into());
+        let txt = toml::to_string_pretty(&c).unwrap();
+        assert!(txt.find("theme = \"tokyo night\"").unwrap() < txt.find("[vars]").unwrap(), "{txt}");
+        // an unknown theme still parses (and resolves to the default later)
+        let back: Config = toml::from_str("theme = \"no-such\"\nflow_bg = true\n[vars]\nRHOST = \"x\"").unwrap();
+        assert_eq!(back.theme, "no-such");
+        assert!(back.flow_bg);
+        assert_eq!(crate::theme::resolve(&back.theme).name, "pivt");
+        // a default config doesn't write the key at all
+        assert!(!toml::to_string_pretty(&Config::default()).unwrap().contains("theme"));
     }
 
     #[test]

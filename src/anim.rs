@@ -1,4 +1,4 @@
-use crate::theme::*;
+use crate::theme::theme;
 use ratatui::prelude::*;
 
 // Deterministic spatial hash so stars are stable across frames & resizes
@@ -19,7 +19,7 @@ struct FieldCfg {
     speed: u64,    // twinkle speed divisor
 }
 
-fn star_at(x: u16, y: u16, tick: u64, cfg: &FieldCfg) -> Option<(char, Color)> {
+fn star_at(x: u16, y: u16, tick: u64, cfg: &FieldCfg, pal: (Color, Color, Color, Color)) -> Option<(char, Color)> {
     // vertical drift: sample the field a bit lower each tick
     let yv = if cfg.drift_div > 0 {
         (y as i64 + tick as i64 / cfg.drift_div) as u16
@@ -35,13 +35,7 @@ fn star_at(x: u16, y: u16, tick: u64, cfg: &FieldCfg) -> Option<(char, Color)> {
     let twinkler = (h >> 3) & twinkle_mask == 0;
     let step = ((tick / cfg.speed) as u32 + phase) % 8;
 
-    let (faint, mid, hi, pop) = if cfg.bright {
-        (STAR_DIM, STAR_MID, STAR_HI, ACCENT)
-    } else if cfg.calm {
-        (STAR_FAINT, STAR_FAINT, STAR_DIM, STAR_MID)
-    } else {
-        (STAR_FAINT, STAR_DIM, STAR_MID, STAR_HI)
-    };
+    let (faint, mid, hi, pop) = pal;
 
     if !twinkler {
         let (g, c) = match h % 3 {
@@ -62,10 +56,18 @@ fn star_at(x: u16, y: u16, tick: u64, cfg: &FieldCfg) -> Option<(char, Color)> {
 }
 
 fn paint(f: &mut Frame, area: Rect, tick: u64, cfg: &FieldCfg) {
+    let t = theme();
+    let pal = if cfg.bright {
+        (t.star_dim, t.star_mid, t.star_hi, t.accent)
+    } else if cfg.calm {
+        (t.star_faint, t.star_faint, t.star_dim, t.star_mid)
+    } else {
+        (t.star_faint, t.star_dim, t.star_mid, t.star_hi)
+    };
     let buf = f.buffer_mut();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
-            if let Some((g, c)) = star_at(x, y, tick, cfg) {
+            if let Some((g, c)) = star_at(x, y, tick, cfg, pal) {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_char(g).set_fg(c);
                 }
@@ -103,14 +105,14 @@ pub fn draw_shooting_star(f: &mut Frame, area: Rect, tick: u64, period: u64, bri
         if x < area.left() as i32 || x >= area.right() as i32 {
             continue;
         }
-        let col = if i == 0 { STAR_HI } else { STAR_DIM };
+        let col = if i == 0 { theme().star_hi } else { theme().star_dim };
         if let Some(cell) = buf.cell_mut((x as u16, y)) {
             cell.set_char(*g).set_fg(col);
         }
     }
     if head >= area.left() as i32 && head < area.right() as i32 {
         if let Some(cell) = buf.cell_mut((head as u16, y)) {
-            cell.set_char('✦').set_fg(if bright { ACCENT } else { STAR_HI });
+            cell.set_char('✦').set_fg(if bright { theme().accent } else { theme().star_hi });
         }
     }
 }
@@ -223,10 +225,10 @@ pub fn draw_flow_app(f: &mut Frame, area: Rect, tick: u64, mouse: Option<(u16, u
         gain: 1.5,
         cutoff: 0.2,
         colors: [
-            blend(STAR_FAINT, tint, 0.18),
-            blend(STAR_DIM, tint, 0.22),
-            blend(STAR_DIM, tint, 0.30),
-            blend(STAR_MID, tint, 0.38),
+            blend(theme().star_faint, tint, 0.18),
+            blend(theme().star_dim, tint, 0.22),
+            blend(theme().star_dim, tint, 0.30),
+            blend(theme().star_mid, tint, 0.38),
         ],
     });
 }
@@ -237,18 +239,20 @@ pub fn draw_flow_splash(f: &mut Frame, area: Rect, tick: u64, mouse: Option<(u16
         peak: 1.0,
         gain: 1.8,
         cutoff: 0.05,
-        colors: [STAR_DIM, STAR_MID, STAR_HI, ACCENT],
+        colors: [theme().star_dim, theme().star_mid, theme().star_hi, theme().accent],
     });
 }
 
 /// Pulsing accent for the selected-row gutter mark.
 pub fn pulse(tick: u64) -> Color {
-    // ping-pong 0..6..0 over 12 ticks, lerp ACCENT -> bright
+    // ping-pong 0..6..0 over 12 ticks, lerp accent -> accent_hi
     let p = (tick % 12) as i32;
     let d = (p - 6).unsigned_abs() as u16; // 0..6
     let t = 6 - d; // bright at mid
+    let th = theme();
+    let ((ar, ag, ab), (br, bg, bb)) = (rgb(th.accent), rgb(th.accent_hi));
     let lerp = |a: u8, b: u8| (a as u16 + ((b as i16 - a as i16) * t as i16 / 6) as u16).min(255) as u8;
-    Color::Rgb(lerp(0x2d, 0xd4), lerp(0xd4, 0xf5), lerp(0xbf, 0xff))
+    Color::Rgb(lerp(ar, br), lerp(ag, bg), lerp(ab, bb))
 }
 
 /// Expanding ASCII shockwave for the flag-capture burst. `progress` 0..1.
@@ -259,7 +263,7 @@ pub fn draw_burst_ring(f: &mut Frame, area: Rect, progress: f32) {
     let maxr = (area.width.max(area.height)) as f32 * 0.7;
     let radius = progress * maxr;
     let glyphs = ['·', '*', '✦', '✷', '#', '%'];
-    let col = blend(OK, STAR_HI, 1.0 - progress);
+    let col = blend(theme().ok, theme().star_hi, 1.0 - progress);
     let buf = f.buffer_mut();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {

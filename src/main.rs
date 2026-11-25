@@ -34,12 +34,15 @@ use std::time::{Duration, Instant};
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && args[1] == "snap" {
-        snapshot(&args[2]);
+        snapshot(&args[2], theme_arg(&args).as_deref());
         return Ok(());
     }
     install_panic_hook();
     let mut terminal = setup()?;
     let mut app = App::new();
+    if let Some(t) = theme_arg(&args) {
+        app.theme_override(&t);
+    }
     // `--fresh` skips restoring the last workspace (it's overwritten on the next save)
     app.restore_session(args.iter().any(|a| a == "--fresh"));
     let res = run(&mut terminal, &mut app);
@@ -49,12 +52,31 @@ fn main() -> io::Result<()> {
     res
 }
 
+/// `--theme <name>` / `--theme=<name>`, else `$PIVT_THEME`: a theme for this
+/// run only (not saved).
+fn theme_arg(args: &[String]) -> Option<String> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--theme" {
+            return it.next().cloned();
+        }
+        if let Some(v) = a.strip_prefix("--theme=") {
+            return Some(v.to_string());
+        }
+    }
+    std::env::var("PIVT_THEME").ok().filter(|v| !v.trim().is_empty())
+}
+
 /// Headless render for development/screenshots: `pivt snap splash:8` or `pivt snap normal`.
 /// Never loads or saves the persistent session, so screenshots stay clean.
-fn snapshot(what: &str) {
+/// `theme`: `--theme <name>` or `$PIVT_THEME`, e.g. `pivt snap normal --theme nord`.
+fn snapshot(what: &str, theme: Option<&str>) {
     use ratatui::backend::TestBackend;
     // no Discord / ping threads: a snapshot must exit right away
     let mut app = App::headless();
+    if let Some(t) = theme {
+        app.theme_override(t);
+    }
     app.tick = 60;
     match what {
         s if s.starts_with("splash:") => {
@@ -180,6 +202,7 @@ fn snapshot(what: &str) {
             app.add.field = 3;
         }
         "help" => app.mode = Mode::Help,
+        "themes" => app.open_theme_picker(),
         "restored" => {
             // dead tabs as they come back from a saved session
             app.mode = Mode::Normal;
@@ -260,8 +283,9 @@ fn snapshot(what: &str) {
         for x in 0..area.width {
             if let Some(cell) = buf.cell((x, y)) {
                 if ansi {
-                    let (fr, fg, fb) = rgb(cell.fg, (0xc9, 0xd1, 0xd9));
-                    let (br, bg, bb) = rgb(cell.bg, (0x0d, 0x11, 0x17));
+                    let th = theme::theme();
+                    let (fr, fg, fb) = rgb(cell.fg, rgb(th.fg, (0, 0, 0)));
+                    let (br, bg, bb) = rgb(cell.bg, rgb(th.bg, (0, 0, 0)));
                     let bold = cell.modifier.contains(ratatui::style::Modifier::BOLD) as u8;
                     line.push_str(&format!(
                         "\x1b[0;{}38;2;{fr};{fg};{fb};48;2;{br};{bg};{bb}m",
@@ -458,6 +482,14 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Gtfo => gtfo_keys(app, key),
         Mode::Recipes => recipe_keys(app, key),
         Mode::Htb => htb_keys(app, key),
+        Mode::Theme => match key.code {
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('t') => app.theme_pick_move(true),
+            KeyCode::Up | KeyCode::Char('k') => app.theme_pick_move(false),
+            KeyCode::Enter => app.theme_pick_confirm(),
+            KeyCode::Char('r') => app.reload_themes(),
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('T') => app.theme_pick_cancel(),
+            _ => {}
+        },
         Mode::Export => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => app.export_writeup(true),
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Enter => app.export_writeup(false),
@@ -514,7 +546,7 @@ fn handle_paste(app: &mut App, text: &str) {
                 b.push_str(&line);
             }
         }
-        Mode::Splash | Mode::Help | Mode::Rooms | Mode::Loot | Mode::Recipes | Mode::Export => {}
+        Mode::Splash | Mode::Help | Mode::Rooms | Mode::Loot | Mode::Recipes | Mode::Export | Mode::Theme => {}
     }
 }
 
@@ -794,6 +826,8 @@ fn normal_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Char('L') => app.open_loot(),
         KeyCode::Char('f') => app.toggle_favorite(),
         KeyCode::Char('b') => app.toggle_bg(),
+        KeyCode::Char('t') => app.cycle_theme(true),
+        KeyCode::Char('T') => app.open_theme_picker(),
         KeyCode::Char('D') => app.toggle_discord(),
         KeyCode::Char('M') => app.cycle_discord_privacy(),
         KeyCode::Char('g') => app.open_gtfo(),

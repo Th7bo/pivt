@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """Render Discord presence badges: python3 scripts/presence_icons.py src/theme.rs assets/presence
 
-One 256px badge per category in theme::category_style (glyph + colour), plus
+One 256px badge per category in theme::CATEGORIES (glyph + pivt hue), plus
 default.png. JetBrains Mono Bold; glyphs it lacks fall back to Iosevka NF."""
 import re, sys, os
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 src = open(sys.argv[1]).read()
 out = sys.argv[2]; os.makedirs(out, exist_ok=True)
-cats = re.findall(r'"(\w+)" => \(\'(.)\', Color::Rgb\(0x(..), 0x(..), 0x(..)\)\)', src)
+# CATEGORIES rows: ("nmap", '⌖', Teal),  — colours come from the pivt preset's
+# hue list (same order as the Hue enum).
+hue_names = re.search(r'enum Hue \{(.*?)\}', src, re.S).group(1).replace(",", " ").split()
+pivt = src[src.index("pub const PIVT"):]
+hue_hex = re.findall(r'0x([0-9a-f]{6})', pivt[pivt.index("    [\n"):])[:len(hue_names)]
+hue = dict(zip(hue_names, hue_hex))
+cats = [(n, g, hue[h][0:2], hue[h][2:4], hue[h][4:6])
+        for n, g, h in re.findall(r'\("(\w+)", \'(.)\', (\w+)\)', src)]
 cats.append(("default", "◆", "2d", "d4", "bf"))
 JB = "/usr/share/fonts/jetbrains-mono-fonts/JetBrainsMono-Bold.otf"
 FALLBACK = "/usr/share/fonts/IosevkaNerdFont/IosevkaNerdFont-Bold.ttf"

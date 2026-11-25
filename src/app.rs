@@ -42,6 +42,8 @@ pub enum Mode {
     Gtfo,
     Recipes,
     Htb,
+    /// Theme picker (live preview; esc reverts).
+    Theme,
     /// "include flags + credentials?" prompt before a writeup export.
     Export,
 }
@@ -275,6 +277,12 @@ pub struct App {
 
     // background effect
     pub flow_bg: bool,
+
+    /// Theme name as saved in config.toml (kept even if that theme is missing).
+    theme_cfg: String,
+    /// Theme picker: highlighted row, and the theme to restore on esc.
+    pub theme_idx: usize,
+    theme_prev: Option<&'static crate::theme::Theme>,
     pub mouse: Option<(u16, u16)>,
 
     // live target status
@@ -324,11 +332,13 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
+        crate::theme::load_custom_dir(&crate::theme::custom_dir());
         Self::build(load_commands(), load_config(), true)
     }
 
     /// For `pivt snap`: same data, but no Discord / pinger background threads.
     pub fn headless() -> Self {
+        crate::theme::load_custom_dir(&crate::theme::custom_dir());
         Self::build(load_commands(), load_config(), false)
     }
 
@@ -347,6 +357,7 @@ impl App {
         let favorites = cfg.favorites.clone();
         let recent = cfg.recent.clone();
         let flow_bg = cfg.flow_bg;
+        crate::theme::set(crate::theme::resolve(&cfg.theme));
         let paths = Paths::from_config(&cfg);
         let path_cfg = (cfg.rooms_dir.clone(), cfg.room_template.clone(), cfg.sync_target_file.clone());
         let discord_rpc = cfg.discord_rpc;
@@ -484,6 +495,9 @@ impl App {
             gtfo_query: String::new(),
             gtfo_idx: 0,
             flow_bg,
+            theme_cfg: cfg.theme.clone(),
+            theme_idx: 0,
+            theme_prev: None,
             mouse: None,
             pinger: if background { Pinger::start() } else { Pinger::idle() },
             lhost_stale,
@@ -785,6 +799,73 @@ impl App {
         self.set_status(if self.flow_bg { "background: flow field" } else { "background: starfield" });
     }
 
+    // ── themes ──
+
+    /// Switch to the next/previous theme and save it.
+    pub fn cycle_theme(&mut self, forward: bool) {
+        let t = crate::theme::step(if forward { 1 } else { -1 });
+        self.apply_theme(t, true);
+    }
+
+    fn apply_theme(&mut self, t: &'static crate::theme::Theme, save: bool) {
+        crate::theme::set(t);
+        if save {
+            self.theme_cfg = t.name.to_string();
+            self.persist_config();
+            self.set_status(format!("theme: {}", t.name));
+        }
+    }
+
+    /// Use a theme for this session only (`--theme` / `PIVT_THEME`).
+    /// Unknown names keep the current theme and say so.
+    pub fn theme_override(&mut self, name: &str) {
+        match crate::theme::find(name) {
+            Some(t) => crate::theme::set(t),
+            None => self.set_status(format!("unknown theme '{name}'")),
+        }
+    }
+
+    pub fn open_theme_picker(&mut self) {
+        let cur = crate::theme::theme();
+        self.theme_idx = crate::theme::all().iter().position(|t| std::ptr::eq(*t, cur)).unwrap_or(0);
+        self.theme_prev = Some(cur);
+        self.mode = Mode::Theme;
+    }
+
+    /// Move the picker highlight and preview that theme live.
+    pub fn theme_pick_move(&mut self, down: bool) {
+        let list = crate::theme::all();
+        let n = list.len();
+        self.theme_idx = if down { (self.theme_idx + 1) % n } else { (self.theme_idx + n - 1) % n };
+        crate::theme::set(list[self.theme_idx]);
+    }
+
+    pub fn theme_pick_confirm(&mut self) {
+        let list = crate::theme::all();
+        if let Some(t) = list.get(self.theme_idx).copied() {
+            self.apply_theme(t, true);
+        }
+        self.theme_prev = None;
+        self.mode = Mode::Normal;
+    }
+
+    pub fn theme_pick_cancel(&mut self) {
+        if let Some(t) = self.theme_prev.take() {
+            crate::theme::set(t);
+        }
+        self.mode = Mode::Normal;
+    }
+
+    /// Re-read ~/.config/pivt/themes/ (picker `r`).
+    pub fn reload_themes(&mut self) {
+        let cur = crate::theme::theme().name.to_string();
+        let n = crate::theme::load_custom_dir(&crate::theme::custom_dir());
+        crate::theme::set(crate::theme::resolve(&cur));
+        let list = crate::theme::all();
+        self.theme_idx = list.iter().position(|t| t.name == cur).unwrap_or(0);
+        self.set_status(format!("reloaded themes · {n} custom"));
+    }
+
     /// Toggle Discord Rich Presence on/off (persisted).
     pub fn toggle_discord(&mut self) {
         self.discord_rpc = !self.discord_rpc;
@@ -908,6 +989,7 @@ impl App {
             favorites: self.favorites.clone(),
             recent: self.recent.clone(),
             flow_bg: self.flow_bg,
+            theme: self.theme_cfg.clone(),
             discord_rpc: self.discord_rpc,
             discord_app_id: self.discord_app_id.clone(),
             discord_link: self.discord_link.clone(),
@@ -2602,6 +2684,34 @@ mod tests {
         app.cat_idx = app.categories.iter().position(|c| *c == cat).unwrap();
         app.cmd_idx = app.visible().iter().position(|&i| i == ci).unwrap();
         assert_eq!(app.selected_cmd().map(cmd_key).as_deref(), Some(key));
+    }
+
+    #[test]
+    fn theme_cycle_and_picker() {
+        let mut app = App::for_tests();
+        // cycling saves the name (persist is off in tests: nothing hits disk)
+        app.cycle_theme(true);
+        assert!(crate::theme::find(&app.theme_cfg).is_some(), "{:?}", app.theme_cfg);
+        assert_eq!(app.status, format!("theme: {}", app.theme_cfg));
+        let saved = app.theme_cfg.clone();
+        // picker: moving previews, esc reverts without touching the saved name
+        app.open_theme_picker();
+        assert!(app.mode == Mode::Theme);
+        let before = app.theme_idx;
+        app.theme_pick_move(true);
+        assert_ne!(app.theme_idx, before);
+        app.theme_pick_cancel();
+        assert!(app.mode == Mode::Normal);
+        assert_eq!(app.theme_cfg, saved);
+        // enter keeps the highlighted one
+        app.open_theme_picker();
+        app.theme_pick_move(false);
+        let want = crate::theme::all()[app.theme_idx].name;
+        app.theme_pick_confirm();
+        assert_eq!(app.theme_cfg, want);
+        // an unknown override keeps going and says so
+        app.theme_override("definitely-not-a-theme");
+        assert!(app.status.contains("unknown theme"));
     }
 
     #[test]

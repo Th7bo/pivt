@@ -1,6 +1,6 @@
 use crate::app::{AddField, App, Focus, Mode};
 use crate::model::extract_placeholders;
-use crate::theme::*;
+use crate::theme::{category_style, theme};
 use ratatui::prelude::*;
 use ratatui::widgets::{
     Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
@@ -8,7 +8,7 @@ use ratatui::widgets::{
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
-    f.render_widget(Block::default().style(Style::default().bg(BG)), area);
+    f.render_widget(Block::default().style(Style::default().bg(theme().bg)), area);
 
     if app.mode == Mode::Splash {
         draw_splash(f, app, area);
@@ -52,6 +52,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::Recipes => draw_recipes(f, app),
         Mode::Htb => draw_htb(f, app),
         Mode::Export => draw_export(f, app),
+        Mode::Theme => draw_theme_picker(f, app),
         _ => {}
     }
 
@@ -70,12 +71,12 @@ pub fn draw(f: &mut Frame, app: &App) {
         let my = area.y + area.height / 2 - 1;
         let r = Rect::new(mx, my, mw.min(area.width), mh.min(area.height));
         f.render_widget(Clear, r);
-        let color = if flash { OK } else { STAR_HI };
+        let color = if flash { theme().ok } else { theme().star_hi };
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Double)
             .border_style(Style::default().fg(color))
-            .style(Style::default().bg(BG));
+            .style(Style::default().bg(theme().bg));
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 msg,
@@ -89,7 +90,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 fn panel(title: &str, focused: bool) -> Block<'_> {
-    let border = if focused { BORDER_HI } else { BORDER };
+    let border = if focused { theme().border_hi } else { theme().border };
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -97,7 +98,7 @@ fn panel(title: &str, focused: bool) -> Block<'_> {
         .title(Span::styled(
             format!(" {title} "),
             Style::default()
-                .fg(if focused { ACCENT } else { DIM })
+                .fg(if focused { theme().accent } else { theme().dim })
                 .add_modifier(Modifier::BOLD),
         ))
 }
@@ -115,8 +116,8 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     // logo — twinkling accent star + active room
     let star = ['✦', '✧', '⋆', '✦'][(app.tick / 8 % 4) as usize];
     let mut logo_spans = vec![
-        Span::styled(format!(" {star} "), Style::default().fg(ACCENT)),
-        Span::styled("pivt", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" {star} "), Style::default().fg(theme().accent)),
+        Span::styled("pivt", Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)),
     ];
     if let Some(r) = &app.active_room {
         let mut name = r.name.clone();
@@ -124,27 +125,27 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             name = name.chars().take(9).collect();
             name.push('…');
         }
-        logo_spans.push(Span::styled(" ▸ ", Style::default().fg(DIM)));
-        logo_spans.push(Span::styled(name, Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD)));
+        logo_spans.push(Span::styled(" ▸ ", Style::default().fg(theme().dim)));
+        logo_spans.push(Span::styled(name, Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD)));
     }
-    f.render_widget(Paragraph::new(Line::from(logo_spans)).block(bare_block(BORDER)), cols[0]);
+    f.render_widget(Paragraph::new(Line::from(logo_spans)).block(bare_block(theme().border)), cols[0]);
 
     // search
     let searching = app.mode == Mode::Search;
     let content: Line = if app.search.is_empty() && !searching {
         Line::from(vec![
-            Span::styled("  / ", Style::default().fg(ACCENT)),
-            Span::styled("search commands…", Style::default().fg(DIM)),
+            Span::styled("  / ", Style::default().fg(theme().accent)),
+            Span::styled("search commands…", Style::default().fg(theme().dim)),
         ])
     } else {
         Line::from(vec![
-            Span::styled("  / ", Style::default().fg(ACCENT)),
-            Span::styled(app.search.clone(), Style::default().fg(FG).add_modifier(Modifier::BOLD)),
-            Span::styled(if searching { "▏" } else { "" }, Style::default().fg(ACCENT)),
+            Span::styled("  / ", Style::default().fg(theme().accent)),
+            Span::styled(app.search.clone(), Style::default().fg(theme().fg).add_modifier(Modifier::BOLD)),
+            Span::styled(if searching { "▏" } else { "" }, Style::default().fg(theme().accent)),
         ])
     };
     f.render_widget(
-        Paragraph::new(content).block(bare_block(if searching { BORDER_HI } else { BORDER })),
+        Paragraph::new(content).block(bare_block(if searching { theme().border_hi } else { theme().border })),
         cols[1],
     );
 
@@ -154,9 +155,9 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let lport = app.vars.get("LPORT").cloned().unwrap_or_default();
     let v = |s: &str, ph: &str| {
         if s.is_empty() {
-            Span::styled(ph.to_string(), Style::default().fg(WARN))
+            Span::styled(ph.to_string(), Style::default().fg(theme().warn))
         } else {
-            Span::styled(s.to_string(), Style::default().fg(OK).add_modifier(Modifier::BOLD))
+            Span::styled(s.to_string(), Style::default().fg(theme().ok).add_modifier(Modifier::BOLD))
         }
     };
     let listener = if lhost.is_empty() && lport.is_empty() {
@@ -167,21 +168,21 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     // reachability dot (background ping)
     let ping = app.ping();
     let dot = match ping.up {
-        Some(true) => Span::styled("● ", Style::default().fg(OK)),
-        Some(false) => Span::styled("● ", Style::default().fg(WARN)),
-        None => Span::styled("○ ", Style::default().fg(DIM)),
+        Some(true) => Span::styled("● ", Style::default().fg(theme().ok)),
+        Some(false) => Span::styled("● ", Style::default().fg(theme().warn)),
+        None => Span::styled("○ ", Style::default().fg(theme().dim)),
     };
     let targets = Line::from(vec![
         Span::raw(" "),
         dot,
         v(&rhost, "no target"),
-        Span::styled("  ⇡ ", Style::default().fg(ACCENT2)),
+        Span::styled("  ⇡ ", Style::default().fg(theme().accent2)),
         if lhost.is_empty() && lport.is_empty() {
-            Span::styled("no listener", Style::default().fg(WARN))
+            Span::styled("no listener", Style::default().fg(theme().warn))
         } else if app.lhost_stale {
-            Span::styled(format!("{listener} ⚠ not local"), Style::default().fg(WARN).add_modifier(Modifier::BOLD))
+            Span::styled(format!("{listener} ⚠ not local"), Style::default().fg(theme().warn).add_modifier(Modifier::BOLD))
         } else {
-            Span::styled(listener, Style::default().fg(OK).add_modifier(Modifier::BOLD))
+            Span::styled(listener, Style::default().fg(theme().ok).add_modifier(Modifier::BOLD))
         },
     ]);
     // box timer (+ rtt) on the right of the target border
@@ -191,9 +192,9 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         (Some(t), None) => format!(" ⏱ {t} "),
         _ => String::new(),
     };
-    let mut block = bare_block(BORDER).title(Span::styled(" target ", Style::default().fg(DIM)));
+    let mut block = bare_block(theme().border).title(Span::styled(" target ", Style::default().fg(theme().dim)));
     if !timer.is_empty() {
-        block = block.title(Line::from(Span::styled(timer, Style::default().fg(DIM))).right_aligned());
+        block = block.title(Line::from(Span::styled(timer, Style::default().fg(theme().dim))).right_aligned());
     }
     f.render_widget(Paragraph::new(targets).block(block), cols[2]);
 }
@@ -242,14 +243,14 @@ fn draw_body(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_run(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Run && app.mode == Mode::Normal;
-    let mut block = panel("run", focused).style(Style::default().bg(BG));
+    let mut block = panel("run", focused).style(Style::default().bg(theme().bg));
     if let Some(job) = app.active_run() {
         let maxw = area.width.saturating_sub(10) as usize;
         let mut c = job.cmd.clone();
         if c.chars().count() > maxw && maxw > 1 {
             c = format!("{}…", c.chars().take(maxw - 1).collect::<String>());
         }
-        block = block.title(Line::from(Span::styled(format!(" {c} "), Style::default().fg(SYN_OP))).right_aligned());
+        block = block.title(Line::from(Span::styled(format!(" {c} "), Style::default().fg(theme().syn_op))).right_aligned());
     }
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -274,22 +275,22 @@ fn draw_run(f: &mut Frame, app: &App, area: Rect) {
         let (glyph, gcol) = if job.is_running() {
             ("●", crate::anim::pulse(app.tick))
         } else if job.restored.is_some() {
-            ("◌", DIM)
+            ("◌", theme().dim)
         } else if job.exit == Some(0) {
-            ("✓", OK)
+            ("✓", theme().ok)
         } else {
-            ("✗", WARN)
+            ("✗", theme().warn)
         };
         if i > 0 {
-            tabs.push(Span::styled(" │ ", Style::default().fg(BORDER)));
+            tabs.push(Span::styled(" │ ", Style::default().fg(theme().border)));
         }
         tabs.push(Span::styled(format!("{glyph} "), Style::default().fg(gcol)));
         tabs.push(Span::styled(
             job.title.clone(),
             if active {
-                Style::default().fg(FG).add_modifier(Modifier::BOLD).bg(SEL_BG)
+                Style::default().fg(theme().fg).add_modifier(Modifier::BOLD).bg(theme().sel_bg)
             } else {
-                Style::default().fg(DIM)
+                Style::default().fg(theme().dim)
             },
         ));
     }
@@ -298,18 +299,18 @@ fn draw_run(f: &mut Frame, app: &App, area: Rect) {
     // status badge (right of the tab bar)
     if let Some(job) = app.active_run() {
         let badge = if job.is_running() {
-            Span::styled(" running ", Style::default().fg(BG).bg(crate::anim::pulse(app.tick)))
+            Span::styled(" running ", Style::default().fg(theme().bg).bg(crate::anim::pulse(app.tick)))
         } else if let Some(was_running) = job.restored {
             let what = match (was_running, job.exit) {
                 (true, _) => "was running".to_string(),
                 (false, Some(0)) | (false, None) => "exited".to_string(),
                 (false, Some(c)) => format!("exit {c}"),
             };
-            Span::styled(format!(" restored · {what} "), Style::default().fg(BG).bg(ACCENT2))
+            Span::styled(format!(" restored · {what} "), Style::default().fg(theme().bg).bg(theme().accent2))
         } else if job.exit == Some(0) {
-            Span::styled(" exit 0 ", Style::default().fg(BG).bg(OK))
+            Span::styled(" exit 0 ", Style::default().fg(theme().bg).bg(theme().ok))
         } else {
-            Span::styled(format!(" exit {} ", job.exit.unwrap_or(-1)), Style::default().fg(BG).bg(WARN))
+            Span::styled(format!(" exit {} ", job.exit.unwrap_or(-1)), Style::default().fg(theme().bg).bg(theme().warn))
         };
         let extra = if app.interacting {
             " ⌨".to_string()
@@ -319,7 +320,7 @@ fn draw_run(f: &mut Frame, app: &App, area: Rect) {
             String::new()
         };
         f.render_widget(
-            Paragraph::new(Line::from(vec![badge, Span::styled(extra, Style::default().fg(DIM))]))
+            Paragraph::new(Line::from(vec![badge, Span::styled(extra, Style::default().fg(theme().dim))]))
                 .alignment(Alignment::Right),
             bar[1],
         );
@@ -387,7 +388,7 @@ fn cell_style(cell: &vt100::Cell) -> Style {
     if let Some(fg) = vt_color(cell.fgcolor()) {
         s = s.fg(fg);
     } else {
-        s = s.fg(Color::Rgb(0xc9, 0xd1, 0xd9));
+        s = s.fg(theme().fg);
     }
     if let Some(bg) = vt_color(cell.bgcolor()) {
         s = s.bg(bg);
@@ -429,10 +430,10 @@ fn draw_categories(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled(
                     format!("{c:<10}"),
                     Style::default()
-                        .fg(if sel { color } else { Color::Rgb(0x8b, 0x98, 0xa5) })
+                        .fg(if sel { color } else { theme().muted })
                         .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
                 ),
-                Span::styled(format!("{count:>2}"), Style::default().fg(DIM)),
+                Span::styled(format!("{count:>2}"), Style::default().fg(theme().dim)),
             ]))
         })
         .collect();
@@ -443,7 +444,7 @@ fn draw_categories(f: &mut Frame, app: &App, area: Rect) {
     }
     let list = List::new(items)
         .block(panel("categories", focused))
-        .highlight_style(Style::default().bg(SEL_BG));
+        .highlight_style(Style::default().bg(theme().sel_bg));
     f.render_stateful_widget(list, area, &mut state);
 }
 
@@ -473,19 +474,19 @@ fn draw_commands(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled(
                     c.name.clone(),
                     Style::default()
-                        .fg(if sel { FG } else { Color::Rgb(0xb0, 0xbc, 0xc9) })
+                        .fg(if sel { theme().fg } else { theme().subtle })
                         .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
                 ),
             ];
             if app.is_favorite_cmd(c) {
-                spans.push(Span::styled("  ★", Style::default().fg(Color::Rgb(0xf0, 0xb4, 0x57))));
+                spans.push(Span::styled("  ★", Style::default().fg(theme().gold)));
             }
             if c.user {
-                spans.push(Span::styled("  ✎", Style::default().fg(ACCENT2)));
+                spans.push(Span::styled("  ✎", Style::default().fg(theme().accent2)));
             }
             if c.is_target() {
                 // target-side: copy-only, `x` refuses it
-                spans.push(Span::styled("  ◎", Style::default().fg(SYN_NUM)));
+                spans.push(Span::styled("  ◎", Style::default().fg(theme().syn_num)));
             }
             if !app.search.is_empty() {
                 spans.push(Span::styled(
@@ -503,7 +504,7 @@ fn draw_commands(f: &mut Frame, app: &App, area: Rect) {
     }
     let list = List::new(items)
         .block(panel(&title, focused))
-        .highlight_style(Style::default().bg(SEL_BG));
+        .highlight_style(Style::default().bg(theme().sel_bg));
     f.render_stateful_widget(list, area, &mut state);
 }
 
@@ -541,21 +542,21 @@ fn command_spans(filled: &str) -> Vec<Span<'static>> {
         let _ = start;
 
         if is_operator(&word) {
-            spans.push(Span::styled(word, Style::default().fg(SYN_OP)));
+            spans.push(Span::styled(word, Style::default().fg(theme().syn_op)));
             expect_binary = true;
             continue;
         }
         let base = if expect_binary {
             expect_binary = false;
-            Style::default().fg(OK).add_modifier(Modifier::BOLD)
+            Style::default().fg(theme().ok).add_modifier(Modifier::BOLD)
         } else if word.starts_with('-') {
-            Style::default().fg(SYN_FLAG)
+            Style::default().fg(theme().syn_flag)
         } else if word.starts_with('\'') || word.starts_with('"') {
-            Style::default().fg(SYN_STR)
+            Style::default().fg(theme().syn_str)
         } else if is_numeric_like(&word) {
-            Style::default().fg(SYN_NUM)
+            Style::default().fg(theme().syn_num)
         } else {
-            Style::default().fg(FG)
+            Style::default().fg(theme().fg)
         };
         push_word(&mut spans, &word, base);
     }
@@ -588,7 +589,7 @@ fn push_word(spans: &mut Vec<Span<'static>>, word: &str, base: Style) {
             {
                 spans.push(Span::styled(
                     token.to_string(),
-                    Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme().warn).add_modifier(Modifier::BOLD),
                 ));
             } else {
                 spans.push(Span::styled(token.to_string(), base));
@@ -611,7 +612,7 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(block, area);
 
     let Some(cmd) = app.selected_cmd() else {
-        let p = Paragraph::new(Span::styled("no command selected", Style::default().fg(DIM)));
+        let p = Paragraph::new(Span::styled("no command selected", Style::default().fg(theme().dim)));
         f.render_widget(p, inner);
         return;
     };
@@ -634,27 +635,27 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
     let mut title_spans = vec![
         Span::styled(
             cmd.name.clone(),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme().accent).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(
             format!(" {cat_glyph} {} ", cmd.category),
-            Style::default().fg(BG).bg(cat_color).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme().bg).bg(cat_color).add_modifier(Modifier::BOLD),
         ),
     ];
     if cmd.user {
-        title_spans.push(Span::styled("  ★ custom", Style::default().fg(ACCENT2)));
+        title_spans.push(Span::styled("  ★ custom", Style::default().fg(theme().accent2)));
     }
     if cmd.is_target() {
-        title_spans.push(Span::styled("  ◎ target", Style::default().fg(SYN_NUM).add_modifier(Modifier::BOLD)));
+        title_spans.push(Span::styled("  ◎ target", Style::default().fg(theme().syn_num).add_modifier(Modifier::BOLD)));
     }
     f.render_widget(Paragraph::new(Line::from(title_spans)), rows[0]);
 
     // description
     let desc = if cmd.description.is_empty() {
-        Span::styled("—", Style::default().fg(DIM))
+        Span::styled("—", Style::default().fg(theme().dim))
     } else {
-        Span::styled(cmd.description.clone(), Style::default().fg(Color::Rgb(0x8b, 0x98, 0xa5)))
+        Span::styled(cmd.description.clone(), Style::default().fg(theme().muted))
     };
     f.render_widget(Paragraph::new(desc).wrap(Wrap { trim: true }), rows[1]);
 
@@ -662,12 +663,12 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
     let cmd_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ACCENT).add_modifier(Modifier::DIM))
-        .title(Span::styled(" command ", Style::default().fg(ACCENT)))
+        .border_style(Style::default().fg(theme().accent).add_modifier(Modifier::DIM))
+        .title(Span::styled(" command ", Style::default().fg(theme().accent)))
         .title(
             Line::from(Span::styled(
                 if cmd.is_target() { " ⏎ copy · run it on the box " } else { " ⏎ copy " },
-                Style::default().fg(DIM),
+                Style::default().fg(theme().dim),
             ))
             .right_aligned(),
         );
@@ -681,7 +682,7 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
     // tags
     let mut tag_spans: Vec<Span> = Vec::new();
     for t in &cmd.tags {
-        tag_spans.push(Span::styled(format!("#{t} "), Style::default().fg(STAR_MID)));
+        tag_spans.push(Span::styled(format!("#{t} "), Style::default().fg(theme().star_mid)));
     }
     if tag_spans.is_empty() {
         tag_spans.push(Span::styled("", Style::default()));
@@ -696,9 +697,9 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
     };
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("─ ", Style::default().fg(BORDER)),
-            Span::styled("variables", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD)),
-            Span::styled(hint, Style::default().fg(DIM)),
+            Span::styled("─ ", Style::default().fg(theme().border)),
+            Span::styled("variables", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD)),
+            Span::styled(hint, Style::default().fg(theme().dim)),
         ])),
         rows[4],
     );
@@ -709,7 +710,7 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
     if phs.is_empty() {
         lines.push(Line::from(Span::styled(
             "  no variables — static command",
-            Style::default().fg(DIM),
+            Style::default().fg(theme().dim),
         )));
     }
     for (i, ph) in phs.iter().enumerate() {
@@ -724,29 +725,29 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
         let gutter = if editing {
             Span::styled(" ▸ ", Style::default().fg(crate::anim::pulse(app.tick)))
         } else if sel {
-            Span::styled(" ▸ ", Style::default().fg(ACCENT))
+            Span::styled(" ▸ ", Style::default().fg(theme().accent))
         } else {
             let (b, st) = if val.is_empty() {
-                ("○", Style::default().fg(WARN))
+                ("○", Style::default().fg(theme().warn))
             } else {
-                ("●", Style::default().fg(OK))
+                ("●", Style::default().fg(theme().ok))
             };
             Span::styled(format!(" {b} "), st)
         };
 
         let name_style = if sel || editing {
-            Style::default().fg(FG).add_modifier(Modifier::BOLD)
+            Style::default().fg(theme().fg).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Rgb(0x8b, 0x98, 0xa5))
+            Style::default().fg(theme().muted)
         };
 
         let value_span = if editing {
             let buf = app.inline_edit.as_ref().map(|(_, b)| b.clone()).unwrap_or_default();
-            Span::styled(format!("{buf}▏"), Style::default().fg(FG).add_modifier(Modifier::BOLD))
+            Span::styled(format!("{buf}▏"), Style::default().fg(theme().fg).add_modifier(Modifier::BOLD))
         } else if val.is_empty() {
-            Span::styled("‹unset›".to_string(), Style::default().fg(WARN))
+            Span::styled("‹unset›".to_string(), Style::default().fg(theme().warn))
         } else {
-            Span::styled(val, Style::default().fg(OK))
+            Span::styled(val, Style::default().fg(theme().ok))
         };
 
         lines.push(Line::from(vec![
@@ -790,6 +791,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Mode::Export => &[("n/⏎", "redacted"), ("y", "include secrets"), ("esc", "cancel")],
         Mode::Flag => &[("⇥", "user/root"), ("type", "value"), ("⏎", "save+copy"), ("esc", "cancel")],
         Mode::Gtfo => &[("type", "filter binary"), ("↑↓", "move"), ("⏎", "copy"), ("esc", "close")],
+        Mode::Theme => &[("↑↓", "preview"), ("⏎", "keep"), ("r", "reload files"), ("esc", "revert")],
         Mode::Recipes => &[("↑↓", "move"), ("⏎", "run recipe"), ("A", "run all matched"), ("esc", "close")],
         Mode::Htb if app.htb_input.is_some() => &[("type", "answer"), ("⏎", "submit"), ("esc", "cancel")],
         Mode::Htb => &[("↑↓", "task"), ("⏎", "answer"), ("h", "hint"), ("m", "machine"), ("s/t", "spawn/stop"), ("r", "refresh"), ("esc", "close")],
@@ -805,10 +807,10 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect, pairs: &[(&str, &str)]) {
     let mut spans: Vec<Span> = Vec::new();
     for (i, (k, lbl)) in pairs.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled(" · ", Style::default().fg(BORDER)));
+            spans.push(Span::styled(" · ", Style::default().fg(theme().border)));
         }
-        spans.push(Span::styled((*k).to_string(), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)));
-        spans.push(Span::styled(format!(" {lbl}"), Style::default().fg(DIM)));
+        spans.push(Span::styled((*k).to_string(), Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(format!(" {lbl}"), Style::default().fg(theme().dim)));
     }
     spans.push(Span::raw(" "));
 
@@ -817,7 +819,7 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect, pairs: &[(&str, &str)]) {
         .constraints([Constraint::Min(10), Constraint::Length(80)])
         .split(area);
     f.render_widget(
-        Paragraph::new(Span::styled(app.status.clone(), Style::default().fg(FG)))
+        Paragraph::new(Span::styled(app.status.clone(), Style::default().fg(theme().fg)))
             .wrap(Wrap { trim: true }),
         cols[0],
     );
@@ -841,12 +843,12 @@ fn draw_vars(f: &mut Frame, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ACCENT))
+        .border_style(Style::default().fg(theme().accent))
         .title(Span::styled(
             " variables ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme().accent).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(PANEL));
+        .style(Style::default().bg(theme().panel));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -859,16 +861,16 @@ fn draw_vars(f: &mut Frame, app: &App) {
         let editing = sel && app.var_editing;
         let val = app.vars.get(k).cloned().unwrap_or_default();
         let (disp, vstyle) = if editing {
-            (format!("{}▏", app.var_buf), Style::default().fg(FG).add_modifier(Modifier::BOLD))
+            (format!("{}▏", app.var_buf), Style::default().fg(theme().fg).add_modifier(Modifier::BOLD))
         } else if val.is_empty() {
-            ("‹unset›".into(), Style::default().fg(WARN))
+            ("‹unset›".into(), Style::default().fg(theme().warn))
         } else {
-            (val.clone(), Style::default().fg(OK))
+            (val.clone(), Style::default().fg(theme().ok))
         };
         let (bullet, bstyle) = if val.is_empty() {
-            ("○", Style::default().fg(WARN))
+            ("○", Style::default().fg(theme().warn))
         } else {
-            ("●", Style::default().fg(OK))
+            ("●", Style::default().fg(theme().ok))
         };
         let mark = if sel {
             Span::styled("▎", Style::default().fg(crate::anim::pulse(app.tick)))
@@ -878,15 +880,15 @@ fn draw_vars(f: &mut Frame, app: &App) {
         ListItem::new(Line::from(vec![
             Span::raw(" "),
             mark,
-            Span::styled(format!(" {k:<11}"), Style::default().fg(Color::Rgb(0xb0, 0xbc, 0xc9))),
-            Span::styled("= ", Style::default().fg(DIM)),
+            Span::styled(format!(" {k:<11}"), Style::default().fg(theme().subtle)),
+            Span::styled("= ", Style::default().fg(theme().dim)),
             Span::styled(disp, vstyle),
         ]))
     };
     let header = |t: &str| {
         ListItem::new(Line::from(Span::styled(
             format!(" ── {t} ──"),
-            Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD),
         )))
     };
 
@@ -907,9 +909,9 @@ fn draw_vars(f: &mut Frame, app: &App) {
 
     if let Some(nk) = &app.var_new_key {
         items.push(ListItem::new(Line::from(vec![
-            Span::styled(" ▎ ", Style::default().fg(ACCENT2)),
-            Span::styled("new var: ", Style::default().fg(ACCENT2)),
-            Span::styled(format!("{nk}▏"), Style::default().fg(FG).add_modifier(Modifier::BOLD)),
+            Span::styled(" ▎ ", Style::default().fg(theme().accent2)),
+            Span::styled("new var: ", Style::default().fg(theme().accent2)),
+            Span::styled(format!("{nk}▏"), Style::default().fg(theme().fg).add_modifier(Modifier::BOLD)),
         ])));
     }
 
@@ -923,10 +925,10 @@ fn draw_gtfo(f: &mut Frame, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Rgb(0x94, 0xa3, 0xb8)))
-        .title(Span::styled(" GTFOBins ", Style::default().fg(FG).add_modifier(Modifier::BOLD)))
-        .title(Line::from(Span::styled(" privesc one-liners ", Style::default().fg(DIM))).right_aligned())
-        .style(Style::default().bg(PANEL));
+        .border_style(Style::default().fg(theme().slate))
+        .title(Span::styled(" GTFOBins ", Style::default().fg(theme().fg).add_modifier(Modifier::BOLD)))
+        .title(Line::from(Span::styled(" privesc one-liners ", Style::default().fg(theme().dim))).right_aligned())
+        .style(Style::default().bg(theme().panel));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -938,26 +940,26 @@ fn draw_gtfo(f: &mut Frame, app: &App) {
     // search
     let q: Line = if app.gtfo_query.is_empty() {
         Line::from(vec![
-            Span::styled(" / ", Style::default().fg(ACCENT)),
-            Span::styled("type a binary — find, vim, python…", Style::default().fg(DIM)),
+            Span::styled(" / ", Style::default().fg(theme().accent)),
+            Span::styled("type a binary — find, vim, python…", Style::default().fg(theme().dim)),
         ])
     } else {
         Line::from(vec![
-            Span::styled(" / ", Style::default().fg(ACCENT)),
-            Span::styled(app.gtfo_query.clone(), Style::default().fg(FG).add_modifier(Modifier::BOLD)),
-            Span::styled("▏", Style::default().fg(ACCENT)),
+            Span::styled(" / ", Style::default().fg(theme().accent)),
+            Span::styled(app.gtfo_query.clone(), Style::default().fg(theme().fg).add_modifier(Modifier::BOLD)),
+            Span::styled("▏", Style::default().fg(theme().accent)),
         ])
     };
     f.render_widget(Paragraph::new(q), rows[0]);
 
     // kind → color
     let kind_color = |k: &str| match k {
-        "sudo" => WARN,
-        "suid" => Color::Rgb(0xfb, 0x92, 0x3c),
-        "shell" => OK,
-        "pager" => ACCENT2,
-        k if k.starts_with("file") => ACCENT,
-        _ => DIM,
+        "sudo" => theme().warn,
+        "suid" => theme().orange,
+        "shell" => theme().ok,
+        "pager" => theme().accent2,
+        k if k.starts_with("file") => theme().accent,
+        _ => theme().dim,
     };
 
     let matches = app.gtfo_matches();
@@ -974,14 +976,14 @@ fn draw_gtfo(f: &mut Frame, app: &App) {
             };
             let mut spans = vec![
                 mark,
-                Span::styled(format!("{:<11}", g.bin), Style::default().fg(if sel { FG } else { Color::Rgb(0xb0, 0xbc, 0xc9) }).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() })),
+                Span::styled(format!("{:<11}", g.bin), Style::default().fg(if sel { theme().fg } else { theme().subtle }).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() })),
                 Span::styled(format!("{:<11}", g.kind), Style::default().fg(kind_color(g.kind))),
             ];
             if sel {
-                spans.push(Span::styled(g.code.to_string(), Style::default().fg(OK)));
+                spans.push(Span::styled(g.code.to_string(), Style::default().fg(theme().ok)));
             } else {
                 let short: String = g.code.chars().take(40).collect();
-                spans.push(Span::styled(short, Style::default().fg(DIM)));
+                spans.push(Span::styled(short, Style::default().fg(theme().dim)));
             }
             ListItem::new(Line::from(spans))
         })
@@ -991,7 +993,7 @@ fn draw_gtfo(f: &mut Frame, app: &App) {
         state.select(Some(app.gtfo_idx));
     }
     f.render_stateful_widget(
-        List::new(items).highlight_style(Style::default().bg(SEL_BG)),
+        List::new(items).highlight_style(Style::default().bg(theme().sel_bg)),
         rows[1],
         &mut state,
     );
@@ -1001,45 +1003,45 @@ fn draw_export(f: &mut Frame, app: &App) {
     let active = app.active_htb_machine();
     let area = centered(f.area(), 66, if active.is_some() { 10 } else { 7 });
     f.render_widget(Clear, area);
-    let color = if active.is_some() { WARN } else { ACCENT };
+    let color = if active.is_some() { theme().warn } else { theme().accent };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(color))
         .title(Span::styled(" export writeup ", Style::default().fg(color).add_modifier(Modifier::BOLD)))
-        .style(Style::default().bg(PANEL));
+        .style(Style::default().bg(theme().panel));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let mut lines = Vec::new();
     if let Some(m) = &active {
         lines.push(Line::from(Span::styled(
             format!("⚠ active machine — {m} isn't retired."),
-            Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme().warn).add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(Span::styled(
             "Sharing solutions breaks HTB rules: keep the export local.",
-            Style::default().fg(FG),
+            Style::default().fg(theme().fg),
         )));
         lines.push(Line::from(Span::styled(
             "The file gets -PRIVATE in its name and a PRIVATE header.",
-            Style::default().fg(DIM),
+            Style::default().fg(theme().dim),
         )));
         lines.push(Line::from(""));
     }
     lines.push(Line::from(Span::styled(
         "HTB/THM rules: no flags or walkthroughs for active content.",
-        Style::default().fg(DIM),
+        Style::default().fg(theme().dim),
     )));
     lines.push(Line::from(Span::styled(
         format!("By default flags + credential values become {}.", crate::writeup::REDACTED),
-        Style::default().fg(DIM),
+        Style::default().fg(theme().dim),
     )));
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled("include flags & credentials? ", Style::default().fg(FG).add_modifier(Modifier::BOLD)),
-        Span::styled("y", Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
-        Span::styled(" / ", Style::default().fg(DIM)),
-        Span::styled("N", Style::default().fg(OK).add_modifier(Modifier::BOLD)),
+        Span::styled("include flags & credentials? ", Style::default().fg(theme().fg).add_modifier(Modifier::BOLD)),
+        Span::styled("y", Style::default().fg(theme().warn).add_modifier(Modifier::BOLD)),
+        Span::styled(" / ", Style::default().fg(theme().dim)),
+        Span::styled("N", Style::default().fg(theme().ok).add_modifier(Modifier::BOLD)),
     ]));
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
@@ -1050,9 +1052,9 @@ fn draw_flag(f: &mut Frame, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(OK))
-        .title(Span::styled(" capture flag ", Style::default().fg(OK).add_modifier(Modifier::BOLD)))
-        .style(Style::default().bg(PANEL));
+        .border_style(Style::default().fg(theme().ok))
+        .title(Span::styled(" capture flag ", Style::default().fg(theme().ok).add_modifier(Modifier::BOLD)))
+        .style(Style::default().bg(theme().panel));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let rows = Layout::default()
@@ -1063,33 +1065,33 @@ fn draw_flag(f: &mut Frame, app: &App) {
     // which selector
     let pill = |label: &str, on: bool| {
         if on {
-            Span::styled(format!(" {label} "), Style::default().fg(BG).bg(OK).add_modifier(Modifier::BOLD))
+            Span::styled(format!(" {label} "), Style::default().fg(theme().bg).bg(theme().ok).add_modifier(Modifier::BOLD))
         } else {
-            Span::styled(format!(" {label} "), Style::default().fg(DIM))
+            Span::styled(format!(" {label} "), Style::default().fg(theme().dim))
         }
     };
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("flag: ", Style::default().fg(DIM)),
+            Span::styled("flag: ", Style::default().fg(theme().dim)),
             pill("user", !app.flag_is_root),
             Span::raw(" "),
             pill("root", app.flag_is_root),
-            Span::styled("   (⇥ toggle)", Style::default().fg(DIM)),
+            Span::styled("   (⇥ toggle)", Style::default().fg(theme().dim)),
         ])),
         rows[0],
     );
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("🚩 ", Style::default().fg(OK)),
-            Span::styled(app.flag_buf.clone(), Style::default().fg(FG).add_modifier(Modifier::BOLD)),
-            Span::styled("▏", Style::default().fg(ACCENT)),
+            Span::styled("🚩 ", Style::default().fg(theme().ok)),
+            Span::styled(app.flag_buf.clone(), Style::default().fg(theme().fg).add_modifier(Modifier::BOLD)),
+            Span::styled("▏", Style::default().fg(theme().accent)),
         ])),
         rows[1],
     );
     f.render_widget(
         Paragraph::new(Span::styled(
             "⏎ writes to room notes Flags table + log, copies to clipboard",
-            Style::default().fg(DIM),
+            Style::default().fg(theme().dim),
         ))
         .wrap(Wrap { trim: true }),
         rows[2],
@@ -1102,26 +1104,26 @@ fn draw_loot(f: &mut Frame, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ACCENT2))
-        .title(Span::styled(" loot ", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD)))
+        .border_style(Style::default().fg(theme().accent2))
+        .title(Span::styled(" loot ", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD)))
         .title(Line::from(Span::styled(
             format!(" {} creds ", app.loot.len()),
-            Style::default().fg(DIM),
+            Style::default().fg(theme().dim),
         )).right_aligned())
-        .style(Style::default().bg(PANEL));
+        .style(Style::default().bg(theme().panel));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     if app.loot.is_empty() {
         f.render_widget(
             Paragraph::new(vec![
-                Line::from(Span::styled("no creds captured yet.", Style::default().fg(DIM))),
+                Line::from(Span::styled("no creds captured yet.", Style::default().fg(theme().dim))),
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled("press ", Style::default().fg(DIM)),
-                    Span::styled("a", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-                    Span::styled(" to add user:pass / hash as you find them.", Style::default().fg(DIM)),
-                    Span::styled("  ⏎ loads them into USER/PASS/HASH.", Style::default().fg(DIM)),
+                    Span::styled("press ", Style::default().fg(theme().dim)),
+                    Span::styled("a", Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)),
+                    Span::styled(" to add user:pass / hash as you find them.", Style::default().fg(theme().dim)),
+                    Span::styled("  ⏎ loads them into USER/PASS/HASH.", Style::default().fg(theme().dim)),
                 ]),
             ])
             .wrap(Wrap { trim: true }),
@@ -1147,20 +1149,20 @@ fn draw_loot(f: &mut Frame, app: &App) {
                 Span::styled(
                     c.label(),
                     Style::default()
-                        .fg(if sel { FG } else { Color::Rgb(0xb0, 0xbc, 0xc9) })
+                        .fg(if sel { theme().fg } else { theme().subtle })
                         .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
                 ),
             ];
             if !c.hash.is_empty() && c.pass.is_empty() {
                 if app.cracks.iter().any(|p| p.hash == c.hash) {
-                    spans.push(Span::styled("  ⬢ cracking…", Style::default().fg(SYN_NUM)));
+                    spans.push(Span::styled("  ⬢ cracking…", Style::default().fg(theme().syn_num)));
                 } else if let Some(k) = crate::hashid::identify(&c.hash).first() {
                     let mode = k.mode.map(|m| format!(" -m {m}")).unwrap_or_else(|| " john".into());
-                    spans.push(Span::styled(format!("  ⬢ {}{mode}", k.name), Style::default().fg(Color::Rgb(0xfb, 0x92, 0x3c))));
+                    spans.push(Span::styled(format!("  ⬢ {}{mode}", k.name), Style::default().fg(theme().orange)));
                 }
             }
             if !c.note.is_empty() {
-                spans.push(Span::styled(format!("   {}", c.note), Style::default().fg(DIM)));
+                spans.push(Span::styled(format!("   {}", c.note), Style::default().fg(theme().dim)));
             }
             ListItem::new(Line::from(spans))
         })
@@ -1168,7 +1170,7 @@ fn draw_loot(f: &mut Frame, app: &App) {
     let mut state = ListState::default();
     state.select(Some(app.loot_idx));
     f.render_stateful_widget(
-        List::new(rows).highlight_style(Style::default().bg(SEL_BG)),
+        List::new(rows).highlight_style(Style::default().bg(theme().sel_bg)),
         inner,
         &mut state,
     );
@@ -1181,7 +1183,7 @@ fn md_spans(text: &str, base: Style) -> Vec<Span<'static>> {
         .filter(|(_, part)| !part.is_empty())
         .map(|(i, part)| {
             if i % 2 == 1 {
-                Span::styled(part.to_string(), Style::default().fg(SYN_FLAG))
+                Span::styled(part.to_string(), Style::default().fg(theme().syn_flag))
             } else {
                 Span::styled(part.to_string(), base)
             }
@@ -1195,19 +1197,19 @@ fn draw_htb(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
     let st = app.htb.snapshot();
     let status = match (&st.busy, &st.message) {
-        (Some(b), _) => Span::styled(format!(" ⟳ {b} "), Style::default().fg(ACCENT)),
-        (None, Some((true, m))) => Span::styled(format!(" {m} "), Style::default().fg(OK)),
-        (None, Some((false, m))) => Span::styled(format!(" ✗ {m} "), Style::default().fg(WARN)),
+        (Some(b), _) => Span::styled(format!(" ⟳ {b} "), Style::default().fg(theme().accent)),
+        (None, Some((true, m))) => Span::styled(format!(" {m} "), Style::default().fg(theme().ok)),
+        (None, Some((false, m))) => Span::styled(format!(" ✗ {m} "), Style::default().fg(theme().warn)),
         _ => Span::raw(""),
     };
-    let htb_green = Color::Rgb(0x9f, 0xef, 0x00);
+    let htb_green = theme().htb;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(htb_green))
         .title(Span::styled(" hack the box ", Style::default().fg(htb_green).add_modifier(Modifier::BOLD)))
         .title(Line::from(status).right_aligned())
-        .style(Style::default().bg(PANEL));
+        .style(Style::default().bg(theme().panel));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -1215,11 +1217,11 @@ fn draw_htb(f: &mut Frame, app: &App) {
         let path = crate::htb::token_path();
         f.render_widget(
             Paragraph::new(vec![
-                Line::from(Span::styled("no HTB App Token yet.", Style::default().fg(FG).add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled("no HTB App Token yet.", Style::default().fg(theme().fg).add_modifier(Modifier::BOLD))),
                 Line::from(""),
-                Line::from(Span::styled("1. app.hackthebox.com → avatar → Account Settings → App Tokens → Create", Style::default().fg(DIM))),
-                Line::from(Span::styled(format!("2. save it to {} (chmod 600), or export HTB_TOKEN", path.display()), Style::default().fg(DIM))),
-                Line::from(Span::styled("3. restart pivt and press H", Style::default().fg(DIM))),
+                Line::from(Span::styled("1. app.hackthebox.com → avatar → Account Settings → App Tokens → Create", Style::default().fg(theme().dim))),
+                Line::from(Span::styled(format!("2. save it to {} (chmod 600), or export HTB_TOKEN", path.display()), Style::default().fg(theme().dim))),
+                Line::from(Span::styled("3. restart pivt and press H", Style::default().fg(theme().dim))),
             ])
             .wrap(Wrap { trim: true }),
             inner.inner(Margin { horizontal: 1, vertical: 1 }),
@@ -1232,41 +1234,41 @@ fn draw_htb(f: &mut Frame, app: &App) {
     // ── header ──
     let Some(m) = &st.machine else {
         let hint = if st.busy.is_some() { "loading…" } else { "no machine loaded — press m and type a machine name" };
-        f.render_widget(Paragraph::new(Span::styled(hint, Style::default().fg(DIM))), rows[0].inner(Margin { horizontal: 1, vertical: 1 }));
+        f.render_widget(Paragraph::new(Span::styled(hint, Style::default().fg(theme().dim))), rows[0].inner(Margin { horizontal: 1, vertical: 1 }));
         draw_htb_input(f, app, rows[2]);
         return;
     };
     let diff_col = match m.difficulty.as_str() {
-        "Easy" => OK,
-        "Medium" => SYN_NUM,
-        "Hard" => WARN,
-        _ => ACCENT2,
+        "Easy" => theme().ok,
+        "Medium" => theme().syn_num,
+        "Hard" => theme().warn,
+        _ => theme().accent2,
     };
-    let tick = |b: bool| if b { ("✓", OK) } else { ("○", DIM) };
+    let tick = |b: bool| if b { ("✓", theme().ok) } else { ("○", theme().dim) };
     let (u, uc) = tick(m.user_owned);
     let (r, rc) = tick(m.root_owned);
     let mut head = vec![
-        Span::styled(format!(" {} ", m.name), Style::default().fg(FG).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{} · ", m.os), Style::default().fg(DIM)),
+        Span::styled(format!(" {} ", m.name), Style::default().fg(theme().fg).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{} · ", m.os), Style::default().fg(theme().dim)),
         Span::styled(m.difficulty.clone(), Style::default().fg(diff_col)),
-        Span::styled(format!(" · {} pts{}   ", m.points, if m.retired { " · retired" } else { "" }), Style::default().fg(DIM)),
+        Span::styled(format!(" · {} pts{}   ", m.points, if m.retired { " · retired" } else { "" }), Style::default().fg(theme().dim)),
     ];
     match &m.ip {
-        Some(ip) => head.push(Span::styled(format!("◎ {ip}   "), Style::default().fg(SYN_NUM))),
-        None if m.spawned => head.push(Span::styled("◎ spawning…   ", Style::default().fg(ACCENT))),
-        None => head.push(Span::styled("◎ not spawned (s)   ", Style::default().fg(DIM))),
+        Some(ip) => head.push(Span::styled(format!("◎ {ip}   "), Style::default().fg(theme().syn_num))),
+        None if m.spawned => head.push(Span::styled("◎ spawning…   ", Style::default().fg(theme().accent))),
+        None => head.push(Span::styled("◎ not spawned (s)   ", Style::default().fg(theme().dim))),
     }
     head.extend([
         Span::styled(format!("user {u}  "), Style::default().fg(uc)),
         Span::styled(format!("root {r}"), Style::default().fg(rc)),
     ]);
     if m.guided {
-        head.push(Span::styled("   guided", Style::default().fg(ACCENT2)));
+        head.push(Span::styled("   guided", Style::default().fg(theme().accent2)));
     }
     f.render_widget(
         Paragraph::new(vec![
             Line::from(head),
-            Line::from(Span::styled(format!(" {}", m.synopsis), Style::default().fg(Color::Rgb(0x8b, 0x98, 0xa5)))),
+            Line::from(Span::styled(format!(" {}", m.synopsis), Style::default().fg(theme().muted))),
         ])
         .wrap(Wrap { trim: false }),
         rows[0],
@@ -1281,14 +1283,14 @@ fn draw_htb(f: &mut Frame, app: &App) {
         .map(|(i, t)| {
             let sel = i == app.htb_idx;
             let (icon, col) = if t.completed {
-                ("✓", OK)
+                ("✓", theme().ok)
             } else if st.locked(t) {
-                ("·", DIM)
+                ("·", theme().dim)
             } else {
                 match t.kind {
-                    TaskKind::User => ("⚑", SYN_NUM),
-                    TaskKind::Root => ("⚑", WARN),
-                    TaskKind::Task => ("○", ACCENT),
+                    TaskKind::User => ("⚑", theme().syn_num),
+                    TaskKind::Root => ("⚑", theme().warn),
+                    TaskKind::Task => ("○", theme().accent),
                 }
             };
             let mark = if sel { Span::styled("▎", Style::default().fg(crate::anim::pulse(app.tick))) } else { Span::raw(" ") };
@@ -1298,7 +1300,7 @@ fn draw_htb(f: &mut Frame, app: &App) {
                 Span::styled(
                     t.title.clone(),
                     Style::default()
-                        .fg(if sel { FG } else if st.locked(t) { DIM } else { Color::Rgb(0xb0, 0xbc, 0xc9) })
+                        .fg(if sel { theme().fg } else if st.locked(t) { theme().dim } else { theme().subtle })
                         .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
                 ),
             ]))
@@ -1306,31 +1308,31 @@ fn draw_htb(f: &mut Frame, app: &App) {
         .collect();
     let mut state = ListState::default();
     state.select(Some(app.htb_idx.min(st.tasks.len().saturating_sub(1))));
-    f.render_stateful_widget(List::new(items).highlight_style(Style::default().bg(SEL_BG)), cols[0], &mut state);
+    f.render_stateful_widget(List::new(items).highlight_style(Style::default().bg(theme().sel_bg)), cols[0], &mut state);
 
     if let Some(t) = st.tasks.get(app.htb_idx) {
-        let mut lines = vec![Line::from(Span::styled(t.title.clone(), Style::default().fg(FG).add_modifier(Modifier::BOLD)))];
+        let mut lines = vec![Line::from(Span::styled(t.title.clone(), Style::default().fg(theme().fg).add_modifier(Modifier::BOLD)))];
         if !t.question.is_empty() {
-            lines.push(Line::from(md_spans(&t.question, Style::default().fg(FG))));
+            lines.push(Line::from(md_spans(&t.question, Style::default().fg(theme().fg))));
         }
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("format  ", Style::default().fg(DIM)),
-            Span::styled(t.format.clone(), Style::default().fg(SYN_NUM)),
+            Span::styled("format  ", Style::default().fg(theme().dim)),
+            Span::styled(t.format.clone(), Style::default().fg(theme().syn_num)),
         ]));
         if t.completed {
-            lines.push(Line::from(Span::styled("✓ solved", Style::default().fg(OK))));
+            lines.push(Line::from(Span::styled("✓ solved", Style::default().fg(theme().ok))));
         } else if st.locked(t) {
-            lines.push(Line::from(Span::styled("locked — solve the previous task first", Style::default().fg(DIM))));
+            lines.push(Line::from(Span::styled("locked — solve the previous task first", Style::default().fg(theme().dim))));
         }
         if !t.hint.is_empty() {
             lines.push(Line::from(""));
             if app.htb_hint {
-                let mut l = vec![Span::styled("hint  ", Style::default().fg(ACCENT2))];
-                l.extend(md_spans(&t.hint, Style::default().fg(Color::Rgb(0x8b, 0x98, 0xa5))));
+                let mut l = vec![Span::styled("hint  ", Style::default().fg(theme().accent2))];
+                l.extend(md_spans(&t.hint, Style::default().fg(theme().muted)));
                 lines.push(Line::from(l));
             } else {
-                lines.push(Line::from(Span::styled("h  reveal hint (free, no point cost)", Style::default().fg(DIM))));
+                lines.push(Line::from(Span::styled("h  reveal hint (free, no point cost)", Style::default().fg(theme().dim))));
             }
         }
         f.render_widget(
@@ -1351,11 +1353,11 @@ fn draw_htb_input(f: &mut Frame, app: &App, area: Rect) {
     let cursor = if app.tick / 10 % 2 == 0 { "▌" } else { " " };
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(format!(" {label}"), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-            Span::styled(buf.clone(), Style::default().fg(FG)),
-            Span::styled(cursor, Style::default().fg(ACCENT)),
+            Span::styled(format!(" {label}"), Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)),
+            Span::styled(buf.clone(), Style::default().fg(theme().fg)),
+            Span::styled(cursor, Style::default().fg(theme().accent)),
         ]))
-        .style(Style::default().bg(SEL_BG)),
+        .style(Style::default().bg(theme().sel_bg)),
         area,
     );
 }
@@ -1367,13 +1369,13 @@ fn draw_recipes(f: &mut Frame, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(" recipes ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)))
+        .border_style(Style::default().fg(theme().accent))
+        .title(Span::styled(" recipes ", Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)))
         .title(Line::from(Span::styled(
             if ports.is_empty() { " no PORTS yet · scan + P ".to_string() } else { format!(" PORTS {ports} ") },
-            Style::default().fg(DIM),
+            Style::default().fg(theme().dim),
         )).right_aligned())
-        .style(Style::default().bg(PANEL));
+        .style(Style::default().bg(theme().panel));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let cols = Layout::horizontal([Constraint::Length(34), Constraint::Min(10)]).split(inner);
@@ -1387,11 +1389,11 @@ fn draw_recipes(f: &mut Frame, app: &App) {
             let sel = i == app.recipe_idx;
             let matched = app.recipe_matched(r);
             let (dot, dc) = if matched {
-                ("●", OK)
+                ("●", theme().ok)
             } else if r.is_generic() {
-                ("◆", ACCENT)
+                ("◆", theme().accent)
             } else {
-                ("○", DIM)
+                ("○", theme().dim)
             };
             let mark = if sel {
                 Span::styled("▎", Style::default().fg(crate::anim::pulse(app.tick)))
@@ -1404,7 +1406,7 @@ fn draw_recipes(f: &mut Frame, app: &App) {
                 Span::styled(
                     r.name.clone(),
                     Style::default()
-                        .fg(if sel { FG } else if matched { Color::Rgb(0xb0, 0xbc, 0xc9) } else { DIM })
+                        .fg(if sel { theme().fg } else if matched { theme().subtle } else { theme().dim })
                         .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
                 ),
             ]))
@@ -1413,7 +1415,7 @@ fn draw_recipes(f: &mut Frame, app: &App) {
     let mut state = ListState::default();
     state.select(Some(app.recipe_idx));
     f.render_stateful_widget(
-        List::new(rows).highlight_style(Style::default().bg(SEL_BG)),
+        List::new(rows).highlight_style(Style::default().bg(theme().sel_bg)),
         cols[0],
         &mut state,
     );
@@ -1421,47 +1423,47 @@ fn draw_recipes(f: &mut Frame, app: &App) {
     // right: detail
     let Some(r) = app.recipes.get(app.recipe_idx) else { return };
     let mut lines = vec![
-        Line::from(Span::styled(r.name.clone(), Style::default().fg(FG).add_modifier(Modifier::BOLD))),
-        Line::from(Span::styled(r.description.clone(), Style::default().fg(Color::Rgb(0x8b, 0x98, 0xa5)))),
+        Line::from(Span::styled(r.name.clone(), Style::default().fg(theme().fg).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(r.description.clone(), Style::default().fg(theme().muted))),
     ];
     let mut when: Vec<String> = r.ports.iter().map(|p| p.to_string()).collect();
     when.extend(r.services.iter().cloned());
     lines.push(Line::from(vec![
-        Span::styled("when ", Style::default().fg(DIM)),
+        Span::styled("when ", Style::default().fg(theme().dim)),
         Span::styled(
             if when.is_empty() { "always".to_string() } else { when.join(" · ") },
-            Style::default().fg(SYN_NUM),
+            Style::default().fg(theme().syn_num),
         ),
     ]));
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled("steps", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD)),
+        Span::styled("steps", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD)),
         Span::styled(
             if r.sequential { "  one at a time" } else { "  all at once" },
-            Style::default().fg(DIM),
+            Style::default().fg(theme().dim),
         ),
     ]));
     for step in &r.steps {
         match app.command_for_key(step) {
             Some(c) => {
-                let (glyph, color) = crate::theme::category_style(&c.category);
+                let (glyph, color) = category_style(&c.category);
                 let missing = app.missing_vars(c);
                 let mut spans = vec![
                     Span::styled(format!(" {glyph} "), Style::default().fg(color)),
-                    Span::styled(c.name.clone(), Style::default().fg(FG)),
-                    Span::styled(format!("  {}", c.category), Style::default().fg(DIM)),
+                    Span::styled(c.name.clone(), Style::default().fg(theme().fg)),
+                    Span::styled(format!("  {}", c.category), Style::default().fg(theme().dim)),
                 ];
                 if missing.is_empty() {
-                    spans.push(Span::styled("  ✓", Style::default().fg(OK)));
+                    spans.push(Span::styled("  ✓", Style::default().fg(theme().ok)));
                 } else {
-                    spans.push(Span::styled(format!("  needs {}", missing.join(",")), Style::default().fg(WARN)));
+                    spans.push(Span::styled(format!("  needs {}", missing.join(",")), Style::default().fg(theme().warn)));
                 }
                 lines.push(Line::from(spans));
             }
             None => lines.push(Line::from(vec![
-                Span::styled(" ✗ ", Style::default().fg(WARN)),
-                Span::styled(step.clone(), Style::default().fg(DIM)),
-                Span::styled("  unknown command", Style::default().fg(WARN)),
+                Span::styled(" ✗ ", Style::default().fg(theme().warn)),
+                Span::styled(step.clone(), Style::default().fg(theme().dim)),
+                Span::styled("  unknown command", Style::default().fg(theme().warn)),
             ])),
         }
     }
@@ -1477,9 +1479,9 @@ fn draw_addloot(f: &mut Frame, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ACCENT2))
-        .title(Span::styled(" add loot ", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD)))
-        .style(Style::default().bg(PANEL));
+        .border_style(Style::default().fg(theme().accent2))
+        .title(Span::styled(" add loot ", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD)))
+        .style(Style::default().bg(theme().panel));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let rows = Layout::default()
@@ -1498,26 +1500,26 @@ fn draw_rooms(f: &mut Frame, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ACCENT2))
-        .title(Span::styled(" ctf rooms ", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD)))
+        .border_style(Style::default().fg(theme().accent2))
+        .title(Span::styled(" ctf rooms ", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD)))
         .title(Line::from(Span::styled(
             format!(" {} ", app.paths.rooms_dir.display()),
-            Style::default().fg(DIM),
+            Style::default().fg(theme().dim),
         )).right_aligned())
-        .style(Style::default().bg(PANEL));
+        .style(Style::default().bg(theme().panel));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     if app.rooms.is_empty() {
         f.render_widget(
             Paragraph::new(vec![
-                Line::from(Span::styled("no rooms yet.", Style::default().fg(DIM))),
+                Line::from(Span::styled("no rooms yet.", Style::default().fg(theme().dim))),
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled("press ", Style::default().fg(DIM)),
-                    Span::styled("n", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-                    Span::styled(" to scaffold one under ", Style::default().fg(DIM)),
-                    Span::styled(app.paths.rooms_dir.display().to_string(), Style::default().fg(FG)),
+                    Span::styled("press ", Style::default().fg(theme().dim)),
+                    Span::styled("n", Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)),
+                    Span::styled(" to scaffold one under ", Style::default().fg(theme().dim)),
+                    Span::styled(app.paths.rooms_dir.display().to_string(), Style::default().fg(theme().fg)),
                 ]),
             ])
             .wrap(Wrap { trim: true }),
@@ -1544,13 +1546,13 @@ fn draw_rooms(f: &mut Frame, app: &App) {
                 Span::raw(" ")
             };
             let dot = if is_active {
-                Span::styled("◆ ", Style::default().fg(OK))
+                Span::styled("◆ ", Style::default().fg(theme().ok))
             } else {
-                Span::styled("· ", Style::default().fg(DIM))
+                Span::styled("· ", Style::default().fg(theme().dim))
             };
             let tag = r
                 .platform()
-                .map(|p| Span::styled(format!(" {}", p.label().to_lowercase()), Style::default().fg(DIM)))
+                .map(|p| Span::styled(format!(" {}", p.label().to_lowercase()), Style::default().fg(theme().dim)))
                 .unwrap_or_else(|| Span::raw(""));
             ListItem::new(Line::from(vec![
                 mark,
@@ -1558,7 +1560,7 @@ fn draw_rooms(f: &mut Frame, app: &App) {
                 Span::styled(
                     r.name.clone(),
                     Style::default()
-                        .fg(if sel { FG } else { Color::Rgb(0xb0, 0xbc, 0xc9) })
+                        .fg(if sel { theme().fg } else { theme().subtle })
                         .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
                 ),
                 tag,
@@ -1569,8 +1571,8 @@ fn draw_rooms(f: &mut Frame, app: &App) {
     state.select(Some(app.room_idx));
     f.render_stateful_widget(
         List::new(items)
-            .block(bare_block(BORDER).title(Span::styled(" rooms ", Style::default().fg(DIM))))
-            .highlight_style(Style::default().bg(SEL_BG)),
+            .block(bare_block(theme().border).title(Span::styled(" rooms ", Style::default().fg(theme().dim))))
+            .highlight_style(Style::default().bg(theme().sel_bg)),
         cols[0],
         &mut state,
     );
@@ -1580,22 +1582,22 @@ fn draw_rooms(f: &mut Frame, app: &App) {
     if let Some(r) = app.rooms.get(app.room_idx) {
         if let Some((ip, host)) = r.read_target() {
             lines.push(Line::from(vec![
-                Span::styled("target  ", Style::default().fg(DIM)),
-                Span::styled(ip, Style::default().fg(OK).add_modifier(Modifier::BOLD)),
+                Span::styled("target  ", Style::default().fg(theme().dim)),
+                Span::styled(ip, Style::default().fg(theme().ok).add_modifier(Modifier::BOLD)),
                 Span::styled(
                     host.map(|h| format!("  {h}")).unwrap_or_default(),
-                    Style::default().fg(ACCENT2),
+                    Style::default().fg(theme().accent2),
                 ),
             ]));
         }
-        lines.push(Line::from(Span::styled("── notes.md ──", Style::default().fg(BORDER))));
+        lines.push(Line::from(Span::styled("── notes.md ──", Style::default().fg(theme().border))));
         for l in r.notes_preview(16) {
-            lines.push(Line::from(Span::styled(l, Style::default().fg(Color::Rgb(0x8b, 0x98, 0xa5)))));
+            lines.push(Line::from(Span::styled(l, Style::default().fg(theme().muted))));
         }
     }
     f.render_widget(
         Paragraph::new(lines)
-            .block(bare_block(BORDER).title(Span::styled(" preview ", Style::default().fg(DIM))))
+            .block(bare_block(theme().border).title(Span::styled(" preview ", Style::default().fg(theme().dim))))
             .wrap(Wrap { trim: true }),
         cols[1],
     );
@@ -1607,9 +1609,9 @@ fn draw_newroom(f: &mut Frame, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ACCENT2))
-        .title(Span::styled(" new room ", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD)))
-        .style(Style::default().bg(PANEL));
+        .border_style(Style::default().fg(theme().accent2))
+        .title(Span::styled(" new room ", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD)))
+        .style(Style::default().bg(theme().panel));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -1623,7 +1625,7 @@ fn draw_newroom(f: &mut Frame, app: &App) {
     f.render_widget(
         Paragraph::new(Span::styled(
             format!("scaffolds {}/<name> with nmap/ loot/ exploits/ + notes.md", app.paths.rooms_dir.display()),
-            Style::default().fg(ACCENT),
+            Style::default().fg(theme().accent),
         ))
         .wrap(Wrap { trim: true }),
         rows[3],
@@ -1639,17 +1641,17 @@ fn draw_confirm_quit(f: &mut Frame, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(WARN))
-        .title(Span::styled(" quit ", Style::default().fg(WARN).add_modifier(Modifier::BOLD)))
-        .style(Style::default().bg(PANEL));
+        .border_style(Style::default().fg(theme().warn))
+        .title(Span::styled(" quit ", Style::default().fg(theme().warn).add_modifier(Modifier::BOLD)))
+        .style(Style::default().bg(theme().panel));
     let inner = block.inner(area);
     f.render_widget(block, area);
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(format!(" {msg}"), Style::default().fg(FG)),
-            Span::styled("y", Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
-            Span::styled("/", Style::default().fg(DIM)),
-            Span::styled("N", Style::default().fg(OK).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {msg}"), Style::default().fg(theme().fg)),
+            Span::styled("y", Style::default().fg(theme().warn).add_modifier(Modifier::BOLD)),
+            Span::styled("/", Style::default().fg(theme().dim)),
+            Span::styled("N", Style::default().fg(theme().ok).add_modifier(Modifier::BOLD)),
         ])),
         inner,
     );
@@ -1661,16 +1663,16 @@ fn draw_note(f: &mut Frame, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(" writeup note ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)))
-        .style(Style::default().bg(PANEL));
+        .border_style(Style::default().fg(theme().accent))
+        .title(Span::styled(" writeup note ", Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)))
+        .style(Style::default().bg(theme().panel));
     let inner = block.inner(area);
     f.render_widget(block, area);
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("✎ ", Style::default().fg(ACCENT2)),
-            Span::styled(app.note_buf.clone(), Style::default().fg(FG)),
-            Span::styled("▏", Style::default().fg(ACCENT)),
+            Span::styled("✎ ", Style::default().fg(theme().accent2)),
+            Span::styled(app.note_buf.clone(), Style::default().fg(theme().fg)),
+            Span::styled("▏", Style::default().fg(theme().accent)),
         ]))
         .wrap(Wrap { trim: false }),
         inner,
@@ -1683,12 +1685,12 @@ fn draw_add(f: &mut Frame, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ACCENT2))
+        .border_style(Style::default().fg(theme().accent2))
         .title(Span::styled(
             " add command ",
-            Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(PANEL));
+        .style(Style::default().bg(theme().panel));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -1716,7 +1718,7 @@ fn draw_add(f: &mut Frame, app: &App) {
         format!("placeholders detected: {}", phs.join(", "))
     };
     f.render_widget(
-        Paragraph::new(Span::styled(hint, Style::default().fg(ACCENT)))
+        Paragraph::new(Span::styled(hint, Style::default().fg(theme().accent)))
             .wrap(Wrap { trim: true }),
         rows[4],
     );
@@ -1726,14 +1728,14 @@ fn draw_field(f: &mut Frame, area: Rect, label: &str, val: &str, active: bool) {
     let b = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(if active { ACCENT } else { BORDER }))
+        .border_style(Style::default().fg(if active { theme().accent } else { theme().border }))
         .title(Span::styled(
             format!(" {label} "),
-            Style::default().fg(if active { ACCENT } else { DIM }),
+            Style::default().fg(if active { theme().accent } else { theme().dim }),
         ));
     let text = Line::from(vec![
-        Span::styled(val.to_string(), Style::default().fg(FG)),
-        Span::styled(if active { "▏" } else { "" }, Style::default().fg(ACCENT)),
+        Span::styled(val.to_string(), Style::default().fg(theme().fg)),
+        Span::styled(if active { "▏" } else { "" }, Style::default().fg(theme().accent)),
     ]);
     f.render_widget(Paragraph::new(text).block(b).wrap(Wrap { trim: false }), area);
 }
@@ -1774,11 +1776,11 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect) {
             let body: String = chars[..shown.saturating_sub(1)].iter().collect();
             spans.push(Span::styled(
                 body,
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                Style::default().fg(theme().accent).add_modifier(Modifier::BOLD),
             ));
             // leading edge glows brighter while still revealing
             let edge: String = chars[shown.saturating_sub(1)..shown].iter().collect();
-            let edge_color = if reveal_cols < w as usize { STAR_HI } else { ACCENT };
+            let edge_color = if reveal_cols < w as usize { theme().star_hi } else { theme().accent };
             spans.push(Span::styled(
                 edge,
                 Style::default().fg(edge_color).add_modifier(Modifier::BOLD),
@@ -1795,7 +1797,7 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect) {
         let rule: String = "─".repeat(rule_w as usize);
         let rule_rect = Rect::new(bx, by + h, w, 1);
         f.render_widget(
-            Paragraph::new(Span::styled(rule, Style::default().fg(BORDER))),
+            Paragraph::new(Span::styled(rule, Style::default().fg(theme().border))),
             rule_rect,
         );
         // subtitle
@@ -1805,7 +1807,7 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(
             Paragraph::new(Span::styled(
                 sub,
-                Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD),
+                Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD),
             )),
             Rect::new(sx, by + h + 1, sw, 1),
         );
@@ -1820,11 +1822,65 @@ fn draw_splash(f: &mut Frame, app: &App, area: Rect) {
             let mx = area.x + (area.width.saturating_sub(mw)) / 2;
             let my = area.y + area.height - 2;
             f.render_widget(
-                Paragraph::new(Span::styled(msg, Style::default().fg(DIM))),
+                Paragraph::new(Span::styled(msg, Style::default().fg(theme().dim))),
                 Rect::new(mx, my, mw, 1),
             );
         }
     }
+}
+
+/// Theme picker: every theme with a swatch strip; the UI behind it is
+/// already repainted in the highlighted theme (live preview).
+fn draw_theme_picker(f: &mut Frame, app: &App) {
+    let list = crate::theme::all();
+    let h = (list.len() as u16 + 5).min(f.area().height);
+    let area = centered(f.area(), 50, h);
+    f.render_widget(Clear, area);
+    let t = theme();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(t.accent))
+        .title(Span::styled(" theme ", Style::default().fg(t.accent).add_modifier(Modifier::BOLD)))
+        .title(Line::from(Span::styled(format!(" {}/{} ", app.theme_idx + 1, list.len()), Style::default().fg(t.dim))).right_aligned())
+        .style(Style::default().bg(t.panel));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, th) in list.iter().enumerate() {
+        let sel = i == app.theme_idx;
+        let custom = !crate::theme::PRESETS.iter().any(|p| std::ptr::eq(p, *th));
+        let mut spans = vec![
+            Span::styled(if sel { " ▸ " } else { "   " }, Style::default().fg(crate::anim::pulse(app.tick))),
+            Span::styled(
+                format!("{:<18}", th.name),
+                Style::default()
+                    .fg(if sel { t.fg } else { t.subtle })
+                    .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
+            ),
+        ];
+        // swatch strip in that theme's own colours, on its own background
+        for c in [th.accent, th.accent2, th.ok, th.warn, th.gold, th.syn_flag, th.orange] {
+            spans.push(Span::styled("██", Style::default().fg(c).bg(th.bg)));
+        }
+        spans.push(Span::styled(if custom { " ✎" } else { "" }, Style::default().fg(t.dim)));
+        let style = if sel { Style::default().bg(t.sel_bg) } else { Style::default() };
+        lines.push(Line::from(spans).style(style));
+    }
+    lines.push(Line::from(""));
+    let mut sample = vec![Span::raw(" ")];
+    sample.extend(command_spans("nmap -sC -sV -p 22,80 10.10.11.42 | tee <OUT>"));
+    lines.push(Line::from(sample));
+    lines.push(Line::from(Span::styled(
+        format!(" custom: {}/*.toml", crate::theme::custom_dir().display()).replace(&home_prefix(), "~"),
+        Style::default().fg(t.dim),
+    )));
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn home_prefix() -> String {
+    std::env::var("HOME").unwrap_or_else(|_| "\u{0}".into())
 }
 
 fn draw_help(f: &mut Frame, app: &App) {
@@ -1833,34 +1889,37 @@ fn draw_help(f: &mut Frame, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ACCENT))
+        .border_style(Style::default().fg(theme().accent))
         .title(Span::styled(
             " help ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme().accent).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(PANEL));
+        .style(Style::default().bg(theme().panel));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     let row = |k: &str, d: &str| {
         Line::from(vec![
-            Span::styled(format!("  {k:<12}"), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-            Span::styled(d.to_string(), Style::default().fg(FG)),
+            Span::styled(format!("  {k:<12}"), Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)),
+            Span::styled(d.to_string(), Style::default().fg(theme().fg)),
         ])
     };
     let lines = vec![
-        Line::from(Span::styled(" navigation", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(" navigation", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD))),
         row("tab / ←→", "switch pane (categories ↔ commands)"),
         row("↑↓ / jk", "move within a pane"),
-        Line::from(Span::styled(" actions", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(" actions", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD))),
         row("enter", "fill from vars + copy (and log it)"),
         row("x", "run it live (◎ target-side: copy only)"),
         row("P", "parse scan output → PORTS + ✸ suggested"),
         row("R", "recipes: run command bundles · A = all matched"),
-        row("H", "Hack The Box: machine, guided tasks + hints, submit"),
+        row("H", "Hack The Box: machine, guided tasks + hints, flags"),
         row("e", "edit variables (split: this cmd / all)"),
         row("f", "pin ★ favorite (shows ★/⏱ categories)"),
-        row("b", "toggle background: starfield ↔ flow field"),
+        row("b / t / T", &format!(
+            "background fx · t / T theme: {}",
+            theme().name.chars().take(20).collect::<String>()
+        )),
         row("D / M", &format!(
             "Discord presence {} · M cycles privacy: {}",
             if app.discord_rpc { "on" } else { "off" },
@@ -1869,12 +1928,12 @@ fn draw_help(f: &mut Frame, app: &App) {
         row("a / d", "add / delete a command"),
         row("/", "fuzzy search across all commands"),
         row("q / esc", "quit"),
-        Line::from(Span::styled(" run pane (⇥ into it)", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(" run pane (⇥ into it)", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD))),
         row("i / ⏎", "interact (type into it) · F12 detach"),
         row("↑↓", "scroll · ←→ switch tab · g tail"),
         row("z", "zoom the run tab fullscreen (bigger PTY)"),
         row("K / d / r", "kill job / close tab / re-run (restored too)"),
-        Line::from(Span::styled(" ctf rooms + writeup", Style::default().fg(ACCENT2).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(" ctf rooms + writeup", Style::default().fg(theme().accent2).add_modifier(Modifier::BOLD))),
         row("c", "rooms: ⏎ use · n new · o notes · p mark thm/htb"),
         row("L", "loot: creds · ⏎ load vars · c crack hash"),
         row("g", "GTFOBins privesc lookup (offline)"),
@@ -1883,11 +1942,11 @@ fn draw_help(f: &mut Frame, app: &App) {
         row("o", "open active room's notes in $EDITOR"),
         Line::from(Span::styled(
             "  copies auto-log to the room · RHOST → sync_target_file (if on)",
-            Style::default().fg(DIM),
+            Style::default().fg(theme().dim),
         )),
         Line::from(Span::styled(
             "  workspace + run tabs come back on launch · pivt --fresh",
-            Style::default().fg(DIM),
+            Style::default().fg(theme().dim),
         )),
     ];
     f.render_widget(Paragraph::new(lines), inner);

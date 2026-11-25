@@ -37,7 +37,68 @@ Run `pivt`, press `?` for keybinds. Add your own commands in
 
 Screenshots are rendered headlessly:
 `PIVT_SNAP_ANSI=1 pivt snap normal > s.txt && python3 scripts/ansi2png.py s.txt s.png`.
-`snap` never reads or writes the saved session.
+`snap` never reads or writes the saved session. Add `--theme <name>` (or set
+`PIVT_THEME=<name>`) to render any theme, e.g. `pivt snap normal --theme nord`.
+
+## Themes
+
+`t` cycles themes and `T` opens a picker with a live preview (`↑↓` preview,
+`⏎` keep, `esc` revert, `r` reload theme files). The choice is saved in
+`config.toml` as `theme = "<name>"`; an unknown name falls back to the
+default instead of breaking the config. `--theme <name>` / `PIVT_THEME`
+override it for one run without saving.
+
+Presets: **pivt** (default), **catppuccin mocha**, **gruvbox dark**,
+**tokyo night**, **nord** and **rosé pine**, using each project's published
+palette. Names match loosely: `rose-pine`, `catppuccin`, `tokyo_night` work.
+
+### Custom themes
+
+Drop a TOML file into `~/.config/pivt/themes/` (one theme per file). Give it a
+`name` (defaults to the file name) and any subset of colour roles as hex
+strings; everything you leave out is inherited from `base` (default: `pivt`).
+Bad colours and unknown keys are skipped, and a file can't reuse a preset's
+name.
+
+```toml
+# ~/.config/pivt/themes/dracula.toml
+name = "dracula"
+base = "pivt"            # optional: inherit from any preset or theme
+
+bg = "#282a36"           # screen background
+panel = "#21222c"        # popups / overlays
+fg = "#f8f8f2"           # main text
+subtle = "#e2e2dc"       # unselected list rows
+muted = "#bfbfbf"        # descriptions
+dim = "#6272a4"          # hints, labels
+accent = "#bd93f9"       # focus, keys, banner (border_hi follows it)
+accent2 = "#ff79c6"      # headings, subtitle
+accent_hi = "#f8f8f2"    # bright end of the pulsing accent
+warn = "#ff5555"         # errors, unset <PLACEHOLDERS>
+ok = "#50fa7b"           # success, set values
+border = "#44475a"
+border_hi = "#bd93f9"    # focused borders
+sel_bg = "#44475a"       # selected row
+star_faint = "#2f3140"   # background starfield / flow field, faint → bright
+star_dim = "#3a3c4e"
+star_mid = "#4d5066"
+star_hi = "#6272a4"
+syn_flag = "#8be9fd"     # command preview: -flags
+syn_str = "#f1fa8c"      #   'strings'
+syn_num = "#ffb86c"      #   numbers / IPs / ports
+syn_op = "#6272a4"       #   | ; && > <
+gold = "#f1fa8c"         # favourite stars
+orange = "#ffb86c"       # hashes, SUID
+slate = "#6272a4"        # GTFOBins frame
+htb = "#50fa7b"          # Hack The Box panel
+
+[categories]             # optional, per category
+nmap = "#8be9fd"
+web = "#bd93f9"
+```
+
+Categories: `nmap web smb shells upgrade transfer ad crack pivot misc encode
+dns snmp rpc db tunnel forensics pwn win msf favorites recent suggested`.
 
 ## Rooms and shell integration
 
