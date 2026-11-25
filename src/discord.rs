@@ -19,6 +19,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const RETRY_SECS: u64 = 15;
 /// Background loop granularity (keeps shutdown responsive).
 const POLL: Duration = Duration::from_millis(500);
+/// How long dropping the handle waits for the thread before detaching it.
+const SHUTDOWN_WAIT: Duration = Duration::from_millis(300);
 
 /// The presence the UI wants shown. Pushed to the background thread, which
 /// applies it whenever it differs from what was last sent.
@@ -77,7 +79,8 @@ impl DiscordRpc {
                     if res.is_ok() {
                         break; // loop exited cleanly (stop requested)
                     }
-                    thread::sleep(Duration::from_secs(RETRY_SECS));
+                    // back off, but stay responsive to shutdown
+                    nap(Duration::from_secs(RETRY_SECS), &st);
                 }
             })
             .ok();
@@ -95,10 +98,30 @@ impl DiscordRpc {
 impl Drop for DiscordRpc {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        // The loop checks `stop` every POLL, so this joins quickly; best-effort.
+        // Never block shutdown on Discord: an IPC call (connect, set/clear
+        // activity) can hang waiting on the pipe. Give the thread a moment to
+        // clear the activity, then detach it; process exit reaps it.
         if let Some(h) = self.handle.take() {
-            let _ = h.join();
+            let deadline = Instant::now() + SHUTDOWN_WAIT;
+            while !h.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if h.is_finished() {
+                let _ = h.join();
+            }
         }
+    }
+}
+
+/// Sleep up to `d`, waking early once `stop` is set.
+fn nap(d: Duration, stop: &AtomicBool) {
+    let until = Instant::now() + d;
+    while !stop.load(Ordering::Relaxed) {
+        let now = Instant::now();
+        if now >= until {
+            break;
+        }
+        thread::sleep((until - now).min(Duration::from_millis(25)));
     }
 }
 
@@ -140,7 +163,7 @@ fn run_loop(app_id: String, shared: Arc<Mutex<Option<Presence>>>, stop: Arc<Atom
             }
         }
 
-        thread::sleep(POLL);
+        nap(POLL, &stop);
     }
 
     // Best-effort clean shutdown.
@@ -186,4 +209,21 @@ fn apply(client: &mut DiscordIpcClient, p: &Presence) -> bool {
         act = act.buttons(buttons);
     }
     client.set_activity(act).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nap_wakes_on_stop() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let s = stop.clone();
+        let t0 = Instant::now();
+        let h = thread::spawn(move || nap(Duration::from_secs(RETRY_SECS), &s));
+        thread::sleep(Duration::from_millis(50));
+        stop.store(true, Ordering::Relaxed);
+        h.join().unwrap();
+        assert!(t0.elapsed() < Duration::from_secs(1), "nap ignored stop");
+    }
 }
